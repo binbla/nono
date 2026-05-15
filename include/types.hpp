@@ -22,6 +22,7 @@ constexpr size_t PRIVATE_KEY_SIZE = 32;    // X25519 private key size
 constexpr size_t SYMMETRIC_KEY_SIZE = 32;  // ChaCha20-Poly1305 key size
 constexpr size_t CHAINING_KEY_SIZE = 32;   // Chaining key size
 constexpr size_t PSK_SIZE = 32;            // Pre-shared key size
+constexpr size_t COOKIE_LIFETIME = 180;    // seconds，cookie有效期
 
 constexpr size_t TIMESTAMP_SIZE = 12;  // 8 bytes timestamp + 4 bytes noise
 constexpr size_t COUNTER_SIZE = 8;     // 64-bit packet counter
@@ -62,8 +63,9 @@ using KeypairIndex = uint32_t;                       // keypair 的索引，32�
 using Tag = std::array<uint8_t, TAG_SIZE>;
 using Nonce = std::array<uint8_t, NONCE_SIZE>;
 using XNonce = std::array<uint8_t, XNONCE_SIZE>;
-using Mac = std::array<uint8_t, MAC_SIZE>;    // Keyed-Blake2s 16
-using Hmac = std::array<uint8_t, HMAC_SIZE>;  // Hmac-Blake2s 32
+using Mac = std::array<uint8_t, MAC_SIZE>;        // Keyed-Blake2s 16
+using Hmac = std::array<uint8_t, HMAC_SIZE>;      // Hmac-Blake2s 32
+using Cookie = std::array<uint8_t, COOKIE_SIZE>;  // cookie 16
 
 using Bytes32 = std::array<uint8_t, 32>;  // 有些中间变量需要不特指某种类型
 

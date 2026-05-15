@@ -29,9 +29,7 @@ struct Handshake {
     ChainingKey chaining_key{};  // ck
     Hash hash{};                 // h
 
-    Mac last_mac1{};  // 用于 initiation 消息的 MAC1 验证
-
-    // responder 侧：记录从该 peer 收到的最新 initiation timestamp。
+        // responder 侧：记录从该 peer 收到的最新 initiation timestamp。
     // 这是长期状态，不应该在每次 clear_runtime() 时清除。
     Timestamp latest_timestamp{};
 
@@ -45,7 +43,7 @@ struct Handshake {
         remote_ephemeral.fill(0);
         hash.fill(0);
         chaining_key.fill(0);
-        last_mac1.fill(0);
+        // last_mac1.fill(0);
 
         // latest_timestamp.clear();
         last_initiation_consumption_ns.clear();

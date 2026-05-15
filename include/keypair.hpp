@@ -42,6 +42,10 @@ class Keypair {
     std::atomic<uint64_t> sending_counter = 0;
     std::atomic<uint64_t> receiving_counter = 0;
 
+    // 握手阶段的临时变量
+    Mac last_mac1{};
+    Cookie last_cookie{};
+
     // 是否是发起者
     bool i_am_the_initiator = false;
     bool is_activated = false;  // 标识这个keypair是否可以发送
@@ -55,6 +59,30 @@ class Keypair {
     void set_receiving(const SymmetricKey& key) { receiving_ = key; }
 
     bool check_replay(uint64_t counter) { return replay_.check(counter); }
+
+    // 清理 keypair 的运行时状态，准备复用或彻底失效化。
+    // 注意：这会安全清零发送/接收密钥，也会清掉 replay 窗口和计数器。
+    void clear_runtime() {
+        // crypto::secure_zero(sending_);
+        crypto::secure_zero(receiving_);
+
+        local_index = 0;
+        remote_index = 0;
+        // owner = nullptr;
+
+        // created_at.clear();
+        last_used_at.clear();
+
+        sending_counter.store(0, std::memory_order_relaxed);
+        receiving_counter.store(0, std::memory_order_relaxed);
+        replay_.reset();
+
+        // last_mac1.fill(0);
+        // last_cookie.fill(0);
+
+        i_am_the_initiator = false;
+        is_activated = false;
+    }
 
    private:
     // 只有密钥需要安全清零和设置一个读取和写入的接口，其他成员不需要
