@@ -2,6 +2,21 @@
 #define MESSAGES_HPP
 #pragma once
 
+#include <endian.h>
+// 注意，多字节的数据结构统一按小端序存
+/*
+序列化
+uint16_t v16 = htole16(x);
+uint32_t v32 = htole32(x);
+uint64_t v64 = htole64(x);
+反序列化
+x = le16toh(v16);
+x = le32toh(v32);
+x = le64toh(v64);
+
+array 这种纯字节流不做处理
+*/
+
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -66,7 +81,7 @@ struct TransportDataHeader {
     MessageType message_type;     // 1
     uint8_t reserved[3];          // 3
     KeypairIndex receiver_index;  // 4
-    uint64_t counter;             // 8
+    uint64_t counter;             // 8 这个要做序列化 注意字节序
 };
 #pragma pack(pop)
 

@@ -4,8 +4,10 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+#include <array>
 #include <cstring>
 #include <optional>
+#include <span>
 
 #include "types.hpp"
 namespace wg {
@@ -23,6 +25,11 @@ namespace wg {
 // - 读取地址族和端口号，判断两个端点是否一致
 class Endpoint {
    public:
+    static constexpr size_t kIpv4StreamSize = 1 + sizeof(in_addr) + 2;
+    static constexpr size_t kIpv6StreamSize = 1 + sizeof(in6_addr) + 2;
+    static constexpr size_t kMaxStreamSize = kIpv6StreamSize;
+    using Stream = std::array<uint8_t, kMaxStreamSize>;
+
     Endpoint() : storage_{}, len_(0) {}
 
     // 从 IPv4 字符串和端口创建端点。
@@ -75,6 +82,70 @@ class Endpoint {
                 reinterpret_cast<const sockaddr_in6*>(&storage_)->sin6_port);
         }
         return 0;
+    }
+
+    // 写出二进制 endpoint 流：
+    // [4|6][IP bytes][port high][port low]，返回实际写入长度，失败返回 0。
+    size_t to_stream(std::span<uint8_t> out) const {
+        if (family() == AF_INET) {
+            if (out.size() < kIpv4StreamSize) {
+                return 0;
+            }
+            const auto* addr =
+                reinterpret_cast<const sockaddr_in*>(&storage_);
+            out[0] = 4;
+            std::memcpy(out.data() + 1, &addr->sin_addr, sizeof(in_addr));
+            std::memcpy(out.data() + 1 + sizeof(in_addr), &addr->sin_port,
+                        sizeof(addr->sin_port));
+            return kIpv4StreamSize;
+        }
+
+        if (family() == AF_INET6) {
+            if (out.size() < kIpv6StreamSize) {
+                return 0;
+            }
+            const auto* addr =
+                reinterpret_cast<const sockaddr_in6*>(&storage_);
+            out[0] = 6;
+            std::memcpy(out.data() + 1, &addr->sin6_addr, sizeof(in6_addr));
+            std::memcpy(out.data() + 1 + sizeof(in6_addr), &addr->sin6_port,
+                        sizeof(addr->sin6_port));
+            return kIpv6StreamSize;
+        }
+
+        return 0;
+    }
+
+    Stream to_stream(size_t& size_out) const {
+        Stream out{};
+        size_out = to_stream(out);
+        return out;
+    }
+
+    static std::optional<Endpoint> from_stream(std::span<const uint8_t> in) {
+        if (in.size() == kIpv4StreamSize && in[0] == 4) {
+            Endpoint endpoint;
+            auto* addr = reinterpret_cast<sockaddr_in*>(&endpoint.storage_);
+            addr->sin_family = AF_INET;
+            std::memcpy(&addr->sin_addr, in.data() + 1, sizeof(in_addr));
+            std::memcpy(&addr->sin_port, in.data() + 1 + sizeof(in_addr),
+                        sizeof(addr->sin_port));
+            endpoint.len_ = sizeof(sockaddr_in);
+            return endpoint;
+        }
+
+        if (in.size() == kIpv6StreamSize && in[0] == 6) {
+            Endpoint endpoint;
+            auto* addr = reinterpret_cast<sockaddr_in6*>(&endpoint.storage_);
+            addr->sin6_family = AF_INET6;
+            std::memcpy(&addr->sin6_addr, in.data() + 1, sizeof(in6_addr));
+            std::memcpy(&addr->sin6_port, in.data() + 1 + sizeof(in6_addr),
+                        sizeof(addr->sin6_port));
+            endpoint.len_ = sizeof(sockaddr_in6);
+            return endpoint;
+        }
+
+        return std::nullopt;
     }
 
     // 比较两个端点是否完全一致，包括地址族、地址和端口。

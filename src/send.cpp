@@ -3,36 +3,11 @@
 #include <cstring>
 
 #include "crypto.hpp"
-
-namespace wg {
+#include "utils.hpp"
 namespace {
-
+// 切割
 std::span<const uint8_t> as_bytes(const void* ptr, size_t size) {
     return {reinterpret_cast<const uint8_t*>(ptr), size};
-}
-
-bool derive_labeled_key(std::span<const uint8_t> label,
-                        std::span<const uint8_t> data, SymmetricKey& out) {
-    std::array<uint8_t, 64> input{};
-    if (label.size() + data.size() > input.size()) {
-        return false;
-    }
-
-    std::memcpy(input.data(), label.data(), label.size());
-    std::memcpy(input.data() + label.size(), data.data(), data.size());
-    return crypto::hash(
-        std::span<const uint8_t>(input.data(), label.size() + data.size()),
-        out);
-}
-
-bool derive_mac1_key(const PublicKey& receiver_static, SymmetricKey& out) {
-    return derive_labeled_key(as_bytes(kMac1Label, sizeof(kMac1Label) - 1),
-                              receiver_static, out);
-}
-
-bool derive_cookie_key(const Mac& mac1, SymmetricKey& out) {
-    return derive_labeled_key(as_bytes(kCookieLabel, sizeof(kCookieLabel) - 1),
-                              mac1, out);
 }
 
 template <typename Message>
@@ -45,110 +20,40 @@ std::span<const uint8_t> bytes_until_mac2(const Message& msg) {
     return as_bytes(&msg, offsetof(Message, mac2));
 }
 
-bool compute_mac1(std::span<const uint8_t> data,
-                  const PublicKey& receiver_static, Mac& out) {
-    SymmetricKey key{};
-    if (!derive_mac1_key(receiver_static, key)) {
-        return false;
-    }
-    const bool ok = crypto::mac(data, key, out);
-    crypto::secure_zero(key);
-    return ok;
+template <typename Message>
+std::span<const uint8_t> wire_bytes(const Message& msg) {
+    return as_bytes(&msg, sizeof(msg));
 }
-
-bool compute_mac2(std::span<const uint8_t> data,
-                  const std::array<uint8_t, COOKIE_SIZE>& cookie, Mac& out) {
-    return crypto::mac(data, cookie, out);
-}
-
-bool decrypt_cookie(const CookieReply& msg, const Mac& last_mac1,
-                    std::array<uint8_t, COOKIE_SIZE>& cookie) {
-    SymmetricKey key{};
-    if (!derive_cookie_key(last_mac1, key)) {
-        return false;
-    }
-
-    const bool ok =
-        crypto::xaead_decrypt(key, msg.nonce, last_mac1, msg.encrypted_cookie,
-                              std::span<uint8_t>(cookie.data(), cookie.size()));
-    crypto::secure_zero(key);
-    return ok;
-}
-
 }  // namespace
+namespace wg {
 
-bool Sender::consume_cookie_reply(const CookieReply& msg,
-                                  IndexTable& index_table) {
-    KeypairIndex expected_index = msg.receiver_index;
-    Keypair* keypair = index_table.find(expected_index);
-
-    if (keypair == nullptr || crypto::is_all_zero(keypair->last_mac1)) {
-        return false;
-    }
-    // 从msg里面取出明文nonce
-    XNonce expected_nonce = msg.nonce;
-    Cookie expected_cookie{};
-    if (!decrypt_cookie(msg, keypair->last_mac1, keypair->last_cookie)) {
-        return false;
-    }
-    keypair->clear_runtime();
-    // 重新走握手流程
-    send_initiation();  // TODO
+// mac 这个函数的实现和公式的参数顺序不一样。
+// 这里的mac函数是data,key,out的参数顺序
+template <typename Message>
+bool Sender::fill_mac1(Message& msg, const Hash& precomputed_mac1_hash) {
+    return crypto::mac(bytes_until_mac1(msg), precomputed_mac1_hash, msg.mac1);
 }
-
-bool Sender::fill_mac1(HandshakeInitiation& msg,
-                       const PublicKey& receiver_static) {
-    msg.mac1.fill(0);
-    msg.mac2.fill(0);
-    if (!compute_mac1(bytes_until_mac1(msg), receiver_static, msg.mac1)) {
-        return false;
-    }
-
-    cookie_.last_mac1 = msg.mac1;
-    cookie_.has_last_mac1 = true;
-    return true;
-}
-
-bool Sender::fill_mac1(HandshakeResponse& msg,
-                       const PublicKey& receiver_static) {
-    msg.mac1.fill(0);
-    msg.mac2.fill(0);
-    if (!compute_mac1(bytes_until_mac1(msg), receiver_static, msg.mac1)) {
-        return false;
-    }
-
-    cookie_.last_mac1 = msg.mac1;
-    cookie_.has_last_mac1 = true;
-    return true;
-}
-
-bool Sender::fill_mac2(HandshakeInitiation& msg, const Endpoint&) const {
-    msg.mac2.fill(0);
-    if (!cookie_is_fresh(Timestamp::now())) {
-        return true;
-    }
-    return compute_mac2(bytes_until_mac2(msg), cookie_.cookie, msg.mac2);
-}
-
-bool Sender::fill_mac2(HandshakeResponse& msg, const Endpoint&) const {
-    msg.mac2.fill(0);
-    if (!cookie_is_fresh(Timestamp::now())) {
-        return true;
-    }
-    return compute_mac2(bytes_until_mac2(msg), cookie_.cookie, msg.mac2);
+template <typename Message>
+bool Sender::fill_mac2(Message& msg, const Cookie& cookie) const {
+    return crypto::mac(bytes_until_mac2(msg), cookie, msg.mac2);
 }
 
 bool Sender::create_initiation(NoiseProtocol& protocol, Peer& peer,
                                Keypair& keypair, HandshakeInitiation& msg) {
+    // 填充协议层面消息内容
+    // 填充 mac1 和 mac2
     if (!protocol.create_initiation(peer, keypair, msg)) {
         return false;
     }
-    if (!fill_mac1(msg, peer.remote_static())) {
+    if (!fill_mac1(msg, peer.precomputed_mac1_hash())) {
+        return false;
+    }
+    const bool has_cookie = !crypto::is_all_zero(keypair.last_cookie);
+    if (has_cookie && !fill_mac2(msg, keypair.last_cookie)) {
         return false;
     }
     keypair.last_mac1 = msg.mac1;
-    const auto& endpoint = peer.endpoint();
-    return !endpoint || fill_mac2(msg, *endpoint);
+    return true;
 }
 
 bool Sender::create_response(NoiseProtocol& protocol, Peer& peer,
@@ -156,11 +61,41 @@ bool Sender::create_response(NoiseProtocol& protocol, Peer& peer,
     if (!protocol.create_response(peer, keypair, msg)) {
         return false;
     }
-    if (!fill_mac1(msg, peer.remote_static())) {
+    if (!fill_mac1(msg, peer.precomputed_mac1_hash())) {
         return false;
     }
-    const auto& endpoint = peer.endpoint();
-    return !endpoint || fill_mac2(msg, *endpoint);
+    const bool has_cookie = !crypto::is_all_zero(keypair.last_cookie);
+    if (has_cookie && !fill_mac2(msg, keypair.last_cookie)) {
+        return false;
+    }
+    keypair.last_mac1 = msg.mac1;
+    return true;
+}
+
+// 这个消息体没有放到protocol去create
+// consume init 必须要提取出mac1和对方的endpoint
+bool Sender::create_cookie_reply(NoiseProtocol& protocol,
+                                 KeypairIndex receiver_index, const Mac& mac1,
+                                 const Endpoint& dst, CookieReply& out) {
+    // 初始化
+    out.message_type = MessageType::CookieReply;
+    out.receiver_index = receiver_index;
+
+    // 生成随机nonce
+    crypto::fill_random(out.nonce);
+    // 抓出ip:port
+    std::span<const uint8_t> data = as_bytes(dst.addr(), dst.size());
+    // 算出cookie
+    Cookie cookie{};
+    crypto::mac(data, protocol.secret_for_cookie(), cookie);
+    // 加密cookie
+    // key : protocol.precomputed_mac2_hash()
+    // nonce : out.nonce
+    // ad : mac1
+    // plaintext : cookie
+    // ciphertext : out.encrypted_cookie
+    return crypto::xaead_encrypt(protocol.precomputed_mac2_hash(), out.nonce,
+                                 mac1, cookie, out.encrypted_cookie);
 }
 
 bool Sender::create_transport(NoiseProtocol& protocol, Keypair& keypair,
@@ -169,8 +104,12 @@ bool Sender::create_transport(NoiseProtocol& protocol, Keypair& keypair,
     return protocol.create_datatrans(keypair, plaintext, msg);
 }
 
+// 握手的这两个数据包都是数据流，不需要管大小端
 SendResult Sender::send_initiation(UdpSocket& socket, NoiseProtocol& protocol,
                                    Peer& peer, Keypair& keypair) {
+    /*
+    peer有合法的endpoint才发送握手消息
+    */
     if (!peer.endpoint()) {
         return {};
     }
@@ -180,7 +119,7 @@ SendResult Sender::send_initiation(UdpSocket& socket, NoiseProtocol& protocol,
         return {};
     }
 
-    const auto bytes = wire_bytes(msg);
+    const std::span<const uint8_t> bytes = wire_bytes(msg);
     const ssize_t sent = socket.send_bytes(bytes, *peer.endpoint());
     return {sent == static_cast<ssize_t>(bytes.size()),
             sent > 0 ? static_cast<size_t>(sent) : 0};
@@ -197,21 +136,22 @@ SendResult Sender::send_response(UdpSocket& socket, NoiseProtocol& protocol,
         return {};
     }
 
-    const auto bytes = wire_bytes(msg);
+    const std::span<const uint8_t> bytes = wire_bytes(msg);
     const ssize_t sent = socket.send_bytes(bytes, *peer.endpoint());
     return {sent == static_cast<ssize_t>(bytes.size()),
             sent > 0 ? static_cast<size_t>(sent) : 0};
 }
 
 SendResult Sender::send_transport(UdpSocket& socket, NoiseProtocol& protocol,
-                                  Peer& peer, Keypair& keypair,
+                                  Peer& peer,
                                   std::span<const uint8_t> plaintext) {
-    if (!peer.endpoint()) {
+    Keypair* keypair = peer.keypairs().current().get();
+    if (!keypair || !keypair->is_sendable()) {
         return {};
     }
 
     TransportData msg{};
-    if (!create_transport(protocol, keypair, plaintext, msg)) {
+    if (!create_transport(protocol, *keypair, plaintext, msg)) {
         return {};
     }
 
@@ -227,26 +167,17 @@ SendResult Sender::send_transport(UdpSocket& socket, NoiseProtocol& protocol,
             sent > 0 ? static_cast<size_t>(sent) : 0};
 }
 
-SendResult Sender::send_cookie_reply(UdpSocket& socket, const Endpoint& dst,
-                                     const CookieReply& msg) const {
-    const auto bytes = wire_bytes(msg);
+SendResult Sender::send_cookie_reply(UdpSocket& socket, NoiseProtocol& protocol,
+                                     KeypairIndex receiver_index,
+                                     const Mac& mac1, const Endpoint& dst) {
+    CookieReply msg{};
+    create_cookie_reply(protocol, receiver_index, mac1, dst, msg);
+    const std::span<const uint8_t> bytes = wire_bytes(msg);
     const ssize_t sent = socket.send_bytes(bytes, dst);
     return {sent == static_cast<ssize_t>(bytes.size()),
             sent > 0 ? static_cast<size_t>(sent) : 0};
 }
-
-std::span<const uint8_t> Sender::wire_bytes(const HandshakeInitiation& msg) {
-    return as_bytes(&msg, sizeof(msg));
-}
-
-std::span<const uint8_t> Sender::wire_bytes(const HandshakeResponse& msg) {
-    return as_bytes(&msg, sizeof(msg));
-}
-
-std::span<const uint8_t> Sender::wire_bytes(const CookieReply& msg) {
-    return as_bytes(&msg, sizeof(msg));
-}
-
+// 具体消息的序列化
 bool Sender::serialize_transport(const TransportData& msg,
                                  size_t plaintext_size,
                                  std::vector<uint8_t>& out) {
@@ -260,11 +191,6 @@ bool Sender::serialize_transport(const TransportData& msg,
     std::memcpy(out.data() + sizeof(TransportDataHeader),
                 msg.encrypted_data.data(), ciphertext_size);
     return true;
-}
-
-bool Sender::cookie_is_fresh(Timestamp now) const {
-    return cookie_.valid && cookie_.received_at.add_seconds(
-                                config_.cookie_lifetime_seconds) > now;
-}
+};
 
 }  // namespace wg

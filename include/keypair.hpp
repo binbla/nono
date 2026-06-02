@@ -47,7 +47,10 @@ class Keypair {
     Cookie last_cookie{};
 
     // 是否是发起者
-    bool i_am_the_initiator = false;
+    bool i_am_the_initiator = false;  // 针对一些特有的行为逻辑
+    // 像是resp方只有收到第一条消息才能发送data
+    // init方只要收到resp就能发data
+    // 主要就是触发keypair 轮转那里的逻辑。
     bool is_activated = false;  // 标识这个keypair是否可以发送
 
    public:
@@ -82,6 +85,57 @@ class Keypair {
 
         i_am_the_initiator = false;
         is_activated = false;
+    }
+
+    // 判断可用性函数
+    // 两个，一个是判断是否可以发送（是否有可用的keypair），一个是判断是否可以接收（握手状态和keypair状态）
+    bool is_sendable() const {
+        // keypair的有效性有两个判断标准：
+        // 1. 时间
+        // 2. package上限
+        if (!is_activated) {
+            return false;
+        }
+
+        Timestamp now = Timestamp::now();
+        bool is_outdated = created_at.diff_seconds(now) > REKEY_AFTER_TIME;
+
+        if (is_outdated) {
+            return false;
+        }
+
+        bool is_overused = sending_counter.load(std::memory_order_relaxed) >
+                           REKEY_AFTER_MESSAGES;
+
+        if (is_overused) {
+            return false;
+        }
+        return true;
+    }
+
+    bool is_receivable() const {
+        // 接收的有效性判断标准：
+        // 1. 握手状态必须是完成的
+        // 2. keypair必须激活且未过期
+
+        if (!is_activated) {
+            return false;
+        }
+
+        Timestamp now = Timestamp::now();
+        bool is_outdated = created_at.diff_seconds(now) > REJECT_AFTER_TIME;
+
+        if (is_outdated) {
+            return false;
+        }
+
+        bool is_overused = receiving_counter.load(std::memory_order_relaxed) >
+                           REJECT_AFTER_MESSAGES;
+
+        if (is_overused) {
+            return false;
+        }
+        return true;
     }
 
    private:

@@ -27,6 +27,7 @@ struct SendResult {
     size_t bytes_sent = 0;
 };
 
+// 上层要负责可用性验证
 class Sender {
     // Sender 是协议外层的“出站封装”：
     // - 调 NoiseProtocol 创建握手/数据消息
@@ -39,26 +40,16 @@ class Sender {
     explicit Sender(const PublicKey& local_static)
         : local_static_(local_static) {}
 
-    // 握手的两条消息都可以出发cookie challenge
-    // 我们设置默认行为，在受到cookie reply的时候
-    // 从keypair取出mac1,解密出cookie.然后清空除了mac1和cookie以外的其他字段
-    // 然后重新发第一条消息重新握手
-    bool consume_cookie_reply(const CookieReply& msg, IndexTable& index_table);
-
-    // 为握手包计算 mac1。
-    // receiver_static 是接收方长期静态公钥；mac1 覆盖消息中 mac1 之前的字节。
-    // 该函数也会保存本次 mac1，供后续 CookieReply 解密使用。
-    bool fill_mac1(HandshakeInitiation& msg, const PublicKey& receiver_static);
-    bool fill_mac1(HandshakeResponse& msg, const PublicKey& receiver_static);
-
-    // 为握手包计算 mac2。
-    // 只有当前保存的 cookie 仍有效时才填入真实 mac2；否则 mac2 置 0 并返回
-    // true。 dst 预留给按 endpoint 绑定 cookie 的实现；当前接口保持这个上下文。
-    bool fill_mac2(HandshakeInitiation& msg, const Endpoint& dst) const;
-    bool fill_mac2(HandshakeResponse& msg, const Endpoint& dst) const;
+    // 为握手包计算 mac1 和 mac2。
+    // mac1 的材料是msg和peer里面的预计算mac1_hash
+    // mac2 的材料是msg和cookie，cookie 自接收后保存在keypair里面
+    template <typename Message>
+    bool fill_mac1(Message& msg, const Hash& mac1_hash);
+    template <typename Message>
+    bool fill_mac2(Message& msg, const Cookie& cookie) const;
 
     // 只构造 initiation，不发送。
-    // 内部调用 NoiseProtocol::create_initiation，并补齐 mac1/mac2。
+    // 上层提供所有材料：Peer,已经分配的keypair，msg
     bool create_initiation(NoiseProtocol& protocol, Peer& peer,
                            Keypair& keypair, HandshakeInitiation& msg);
 
@@ -74,6 +65,10 @@ class Sender {
                           std::span<const uint8_t> plaintext,
                           TransportData& msg);
 
+    bool create_cookie_reply(NoiseProtocol& protocol,
+                             KeypairIndex receiver_index, const Mac& mac1,
+                             const Endpoint& dst, CookieReply& out);
+
     // 构造并发送 initiation。Peer 必须已经有 endpoint。
     // 返回 ok=false 表示构造失败、缺少 endpoint 或 socket 发送失败。
     SendResult send_initiation(UdpSocket& socket, NoiseProtocol& protocol,
@@ -86,23 +81,19 @@ class Sender {
     // 构造并发送 transport data。Peer 必须已经有 endpoint。
     // bytes_sent 是最终 UDP payload 的字节数，不是 plaintext 长度。
     SendResult send_transport(UdpSocket& socket, NoiseProtocol& protocol,
-                              Peer& peer, Keypair& keypair,
-                              std::span<const uint8_t> plaintext);
+                              Peer& peer, std::span<const uint8_t> plaintext);
 
     // CookieReply 是 receive 层在负载较高或 mac2 不满足时发回去的控制包。
     // 这里仅负责把已经构造好的 CookieReply 发到指定 endpoint。
-    SendResult send_cookie_reply(UdpSocket& socket, const Endpoint& dst,
-                                 const CookieReply& msg) const;
+    SendResult send_cookie_reply(UdpSocket& socket, NoiseProtocol& protocol,
+                                 KeypairIndex receiver_index, const Mac& mac1,
+                                 const Endpoint& dst);
 
-    // 返回固定长度消息的 wire 视图。
-    // 视图直接指向 msg 本身，msg 生命周期结束后 span 失效。
-    static std::span<const uint8_t> wire_bytes(const HandshakeInitiation& msg);
-    static std::span<const uint8_t> wire_bytes(const HandshakeResponse& msg);
-    static std::span<const uint8_t> wire_bytes(const CookieReply& msg);
+    SendResult send_keepalive(UdpSocket& socket, NoiseProtocol& protocol,
+                              Peer& peer, Keypair& keypair);
 
-    // TransportData 的 wire 长度取决于明文长度：
-    // sizeof(TransportDataHeader) + plaintext_size + TAG_SIZE。
-    // out 会被 resize 并写入完整 UDP payload。
+    // 具体消息的序列化，特别是 TransportData 需要把 header 和加密数据拼成连续的
+    // bytes。
     static bool serialize_transport(const TransportData& msg,
                                     size_t plaintext_size,
                                     std::vector<uint8_t>& out);

@@ -18,6 +18,7 @@
 #include "utils.hpp"
 
 namespace wg {
+constexpr const char kMac1Label[] = "mac1----";  // 用作预计算
 
 struct PeerConfig {  // 离线定义一个Peer（名片）
     PublicKey remote_static;
@@ -41,7 +42,15 @@ class Peer {
     explicit Peer(const PeerConfig& config)
         : remote_static_(config.remote_static),
           preshared_key_(config.preshared_key),
-          endpoint_(config.endpoint) {}
+          endpoint_(config.endpoint) {
+        std::span<const uint8_t> mac1label(
+            reinterpret_cast<const uint8_t*>(kMac1Label),
+            sizeof(kMac1Label) - 1);
+        std::span<const uint8_t> remote_static_span(remote_static_.data(),
+                                                    remote_static_.size());
+        crypto::hash_concat(mac1label, remote_static_span,
+                            precomputed_mac1_hash_);
+    }
 
     // -------- identity / config --------
 
@@ -61,6 +70,7 @@ class Peer {
     }
     const Hash& base_hash() const { return base_hash_; }  // mixed pubkey
     void set_precomputed_static_static(const SharedSecret&);
+    const Hash& precomputed_mac1_hash() const { return precomputed_mac1_hash_; }
 
     Handshake& handshake() { return handshake_; }  // 返回的是引用，方便外部修改
     KeypairManager& keypairs() { return keypairs_; }
@@ -71,10 +81,13 @@ class Peer {
     PreSharedKey preshared_key_{};
     std::optional<Endpoint> endpoint_;
 
+    // 三个预计算材料
     // 与 peer 绑定的长期预计算缓存也就是secret
     SharedSecret precomputed_static_static_{};
     // HASH(H_{init} || S^{pub}_r)，也就是base_hash
     Hash base_hash_{};
+    // 预计算 mac1 的 key 派生输入，等价于 HASH("mac1----" || S^{pub}_r)
+    Hash precomputed_mac1_hash_{};
 
     // 运行时状态 Handshake 和 KeypairManager
     Handshake handshake_;  // 静态分配空间，避免后续频繁new/delete
