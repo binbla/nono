@@ -39,6 +39,8 @@ ReceiveResult result(ReceiveAction action, ReceiveError error,
 }
 
 // 入口函数，负责识别消息类型并分发到对应的处理函数。
+// 1. 获取消息类型并验证基本长度
+// 2. 根据消息类型调用对应的 consume_* 函数
 ReceiveResult Receiver::handle_packet(
     UdpSocket& socket, NoiseProtocol& protocol, PeerManager& peers,
     IndexTable& index_table, std::span<const uint8_t> packet,
@@ -54,9 +56,6 @@ ReceiveResult Receiver::handle_packet(
 
     switch (*type) {
         case MessageType::HandshakeInitiation: {
-            if (config_.load_monitor != nullptr) {
-                config_.load_monitor->observe_handshake();
-            }
             HandshakeInitiation msg{};
             if (!parse_initiation(packet, msg)) {
                 return result(ReceiveAction::Drop, ReceiveError::ShortPacket,
@@ -65,9 +64,6 @@ ReceiveResult Receiver::handle_packet(
             return consume_initiation(socket, protocol, peers, msg, src);
         }
         case MessageType::HandshakeResponse: {
-            if (config_.load_monitor != nullptr) {
-                config_.load_monitor->observe_handshake();
-            }
             HandshakeResponse msg{};
             if (!parse_response(packet, msg)) {
                 return result(ReceiveAction::Drop, ReceiveError::ShortPacket,
@@ -195,7 +191,30 @@ ReceiveResult Receiver::consume_cookie_reply(const CookieReply& msg,
                                              const Endpoint& src) {
     return result(ReceiveAction::ConsumedCookieReply, ReceiveError::None, src);
 }
-
+bool Receiver::parse_initiation(std::span<const uint8_t> packet,
+                                HandshakeInitiation& out) {
+    if (packet.size() < sizeof(HandshakeInitiation)) {
+        return false;
+    }
+    std::memcpy(&out, packet.data(), sizeof(HandshakeInitiation));
+    return out.message_type == MessageType::HandshakeInitiation;
+}
+bool Receiver::parse_response(std::span<const uint8_t> packet,
+                              HandshakeResponse& out) {
+    if (packet.size() < sizeof(HandshakeResponse)) {
+        return false;
+    }
+    std::memcpy(&out, packet.data(), sizeof(HandshakeResponse));
+    return out.message_type == MessageType::HandshakeResponse;
+}
+bool Receiver::parse_cookie_reply(std::span<const uint8_t> packet,
+                                  CookieReply& out) {
+    if (packet.size() < sizeof(CookieReply)) {
+        return false;
+    }
+    std::memcpy(&out, packet.data(), sizeof(CookieReply));
+    return out.message_type == MessageType::CookieReply;
+}
 bool Receiver::parse_transport(std::span<const uint8_t> packet,
                                TransportData& out, size_t& ciphertext_size) {
     if (packet.size() < sizeof(TransportDataHeader) + TAG_SIZE) {

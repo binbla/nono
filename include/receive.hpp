@@ -161,13 +161,6 @@ class Receiver {
     bool verify_mac2(const HandshakeInitiation& msg, const Endpoint& src) const;
     bool verify_mac2(const HandshakeResponse& msg, const Endpoint& src) const;
 
-    // 构造 CookieReply。
-    // mac1 用作 AEAD associated data；receiver_index 通常取对方握手包里的
-    // sender_index。
-    bool create_cookie_reply(const Mac& mac1, const Endpoint& src,
-                             KeypairIndex receiver_index,
-                             CookieReply& out) const;
-
     // 只读取首字节判断消息类型，不做长度校验。
     static std::optional<MessageType> peek_message_type(
         std::span<const uint8_t> packet);

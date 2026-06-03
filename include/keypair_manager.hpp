@@ -9,11 +9,10 @@ class KeypairManager {
    public:
     using Ptr = std::shared_ptr<Keypair>;  // 注意生命周期
 
+    // 三个外部接口：current/previous/next
     Ptr current() const { return current_; }
     Ptr previous() const { return previous_; }
     Ptr next() const { return next_; }
-
-    // 正在握手流程的 keypair
 
     void clear() {
         current_.reset();

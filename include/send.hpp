@@ -48,27 +48,6 @@ class Sender {
     template <typename Message>
     bool fill_mac2(Message& msg, const Cookie& cookie) const;
 
-    // 只构造 initiation，不发送。
-    // 上层提供所有材料：Peer,已经分配的keypair，msg
-    bool create_initiation(NoiseProtocol& protocol, Peer& peer,
-                           Keypair& keypair, HandshakeInitiation& msg);
-
-    // 只构造 response，不发送。
-    // 通常在 receive 层成功消费 initiation 后，由 core 分配 keypair 再调用。
-    bool create_response(NoiseProtocol& protocol, Peer& peer, Keypair& keypair,
-                         HandshakeResponse& msg);
-
-    // 只构造 transport data，不发送。
-    // plaintext 长度不能超过 PAYLOAD_MAX_SIZE；counter/nonce 由 protocol
-    // 层处理。
-    bool create_transport(NoiseProtocol& protocol, Keypair& keypair,
-                          std::span<const uint8_t> plaintext,
-                          TransportData& msg);
-
-    bool create_cookie_reply(NoiseProtocol& protocol,
-                             KeypairIndex receiver_index, const Mac& mac1,
-                             const Endpoint& dst, CookieReply& out);
-
     // 构造并发送 initiation。Peer 必须已经有 endpoint。
     // 返回 ok=false 表示构造失败、缺少 endpoint 或 socket 发送失败。
     SendResult send_initiation(UdpSocket& socket, NoiseProtocol& protocol,
@@ -90,7 +69,7 @@ class Sender {
                                  const Endpoint& dst);
 
     SendResult send_keepalive(UdpSocket& socket, NoiseProtocol& protocol,
-                              Peer& peer, Keypair& keypair);
+                              Peer& peer);
 
     // 具体消息的序列化，特别是 TransportData 需要把 header 和加密数据拼成连续的
     // bytes。

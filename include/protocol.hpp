@@ -92,6 +92,7 @@ class NoiseProtocol {
 
     ChainingKey base_chaining_key_{};
     Hash base_hash_{};
+
     // Hash(kCookieLabel || S^{pub}) 自己的公钥
     Hash precomputed_mac2_hash_{};
     Bytes32 secret_for_cookie_;

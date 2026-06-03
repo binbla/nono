@@ -37,6 +37,7 @@ bool reserve_sending_counter(Keypair& keypair, uint64_t& counter) {
 // 预计算 base_chaining_key 和 base_hash
 bool NoiseProtocol::initialize(const PrivateKey& local_private,
                                const PublicKey& local_public) {
+    // 初始化本地长期密钥对和预计算的 base_chaining_key / base_hash
     if (wg::crypto::is_all_zero(local_private) ||
         wg::crypto::is_all_zero(local_public)) {
         return false;
