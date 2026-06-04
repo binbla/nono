@@ -20,9 +20,6 @@
 
 namespace wg {
 
-constexpr char kMac1Label[] = "mac1----";
-constexpr char kCookieLabel[] = "cookie--";
-
 enum class ReceiveAction {
     Drop,
     ConsumedCookieReply,
@@ -124,42 +121,43 @@ class Receiver {
     // CookieReply。
     ReceiveResult consume_initiation(UdpSocket& socket, NoiseProtocol& protocol,
                                      PeerManager& peers,
-                                     const HandshakeInitiation& msg,
+                                     HandshakeInitiation& msg,
                                      const Endpoint& src);
 
     // 消费 response。
     // 成功时返回 ConsumedResponse 并带出 peer；通常随后由 core 轮转 keypair。
     ReceiveResult consume_response(NoiseProtocol& protocol, PeerManager& peers,
                                    IndexTable& index_table,
-                                   const HandshakeResponse& msg,
-                                   const Endpoint& src);
+                                   HandshakeResponse& msg, const Endpoint& src);
     // 识别 CookieReply。
     // 真正解密并更新发送侧 cookie 的动作交给 Sender::consume_cookie_reply。
     // 握手的两条消息都可以出发cookie challenge
     // 我们设置默认行为，在受到cookie reply的时候
     // 从keypair取出mac1,解密出cookie.然后清空除了mac1和cookie以外的其他字段
     // 然后重新发第一条消息重新握手
-    ReceiveResult consume_cookie_reply(const CookieReply& msg,
-                                       const Endpoint& src);
+    ReceiveResult consume_cookie_reply(CookieReply& msg, const Endpoint& src,
+                                       IndexTable& index_table);
 
     // 消费 transport data。
     // ciphertext_size 是 packet 中真实密文长度；plaintext_out 必须至少容纳
     // ciphertext_size - TAG_SIZE 字节。
     ReceiveResult consume_transport(NoiseProtocol& protocol,
-                                    IndexTable& index_table,
-                                    const TransportData& msg,
+                                    IndexTable& index_table, TransportData& msg,
                                     size_t ciphertext_size, const Endpoint& src,
                                     std::span<uint8_t> plaintext_out);
 
     // 校验 mac1。
+    template <typename Message>
+    bool verify_mac1(const Message& msg,
+                     const Hash& precompute_mac1_hash) const;
+
     // mac1 证明发送方知道接收方静态公钥，可用于丢弃明显无效的握手包。
-    bool verify_mac1(const HandshakeInitiation& msg) const;
-    bool verify_mac1(const HandshakeResponse& msg) const;
 
     // 校验 mac2。
+    template <typename Message>
+    bool verify_mac2(const Message& msg, const Endpoint& src,
+                     const Bytes32& secret_for_cookie) const;
     // mac2 绑定源 endpoint，用于高负载时确认对方能收到 CookieReply。
-    bool verify_mac2(const HandshakeInitiation& msg, const Endpoint& src) const;
-    bool verify_mac2(const HandshakeResponse& msg, const Endpoint& src) const;
 
     // 只读取首字节判断消息类型，不做长度校验。
     static std::optional<MessageType> peek_message_type(

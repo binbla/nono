@@ -49,12 +49,16 @@ bool NoiseProtocol::initialize(const PrivateKey& local_private,
         return false;
     }
     // 用作生成cookie的预计算材料，等价于 HASH(kCookieLabel || S^{pub})
+    std::span<const uint8_t> mac1_label_span(
+        reinterpret_cast<const uint8_t*>(kMac1Label), sizeof(kMac1Label) - 1);
     std::span<const uint8_t> cookie_label_span(
         reinterpret_cast<const uint8_t*>(kCookieLabel),
         sizeof(kCookieLabel) - 1);
+
     std::span<const uint8_t> local_public_span(local_public_.data(),
                                                local_public_.size());
-
+    crypto::hash_concat(mac1_label_span, local_public_span,
+                        precomputed_mac1_hash_);
     crypto::hash_concat(cookie_label_span, local_public_span,
                         precomputed_mac2_hash_);
 

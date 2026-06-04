@@ -18,7 +18,8 @@
 #include "utils.hpp"
 
 namespace wg {
-constexpr const char kMac1Label[] = "mac1----";  // 用作预计算
+constexpr const char kMac1Label[] = "mac1----";    // 用作预计算
+constexpr const char kCookieLabel[] = "cookie--";  // 用作预计算
 
 struct PeerConfig {  // 离线定义一个Peer（名片）
     PublicKey remote_static;
@@ -48,8 +49,13 @@ class Peer {
             sizeof(kMac1Label) - 1);
         std::span<const uint8_t> remote_static_span(remote_static_.data(),
                                                     remote_static_.size());
+        std::span<const uint8_t> cookie_label_span(
+            reinterpret_cast<const uint8_t*>(kCookieLabel),
+            sizeof(kCookieLabel) - 1);
         crypto::hash_concat(mac1label, remote_static_span,
                             precomputed_mac1_hash_);
+        crypto::hash_concat(cookie_label_span, remote_static_span,
+                            precomputed_mac2_hash_);
     }
 
     // -------- identity / config --------
@@ -69,8 +75,21 @@ class Peer {
         return precomputed_static_static_;
     }
     const Hash& base_hash() const { return base_hash_; }  // mixed pubkey
-    void set_precomputed_static_static(const SharedSecret&);
+    void set_precomputed_static_static(const SharedSecret& secret) {
+        precomputed_static_static_ = secret;
+    }
+    bool initialize_crypto_state(const PrivateKey& local_private,
+                                 const Hash& protocol_base_hash) {
+        if (!crypto::dh(local_private, remote_static_,
+                        precomputed_static_static_)) {
+            return false;
+        }
+        return noise::initialize_handshake_from_base(protocol_base_hash,
+                                                     remote_static_,
+                                                     base_hash_);
+    }
     const Hash& precomputed_mac1_hash() const { return precomputed_mac1_hash_; }
+    const Hash& precomputed_mac2_hash() const { return precomputed_mac2_hash_; }
 
     Handshake& handshake() { return handshake_; }  // 返回的是引用，方便外部修改
     KeypairManager& keypairs() { return keypairs_; }
@@ -88,6 +107,8 @@ class Peer {
     Hash base_hash_{};
     // 预计算 mac1 的 key 派生输入，等价于 HASH("mac1----" || S^{pub}_r)
     Hash precomputed_mac1_hash_{};
+    // 预计算 mac2 的 key 派生输入，等价于 HASH("cookie--" || S^{pub}_r)
+    Hash precomputed_mac2_hash_{};
 
     // 运行时状态 Handshake 和 KeypairManager
     Handshake handshake_;  // 静态分配空间，避免后续频繁new/delete

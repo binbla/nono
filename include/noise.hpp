@@ -20,9 +20,9 @@ namespace wg::noise {
 // 这一层只定义固定协议字符串，不保存任何运行期状态。
 // base_chaining_key / base_hash 由 NoiseProtocol 初始化后保存。
 
-extern const char kNoiseConstruction[] =
+inline constexpr char kNoiseConstruction[] =
     "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s";  // 37 bytes
-extern const char kNoiseIdentifier[] =
+inline constexpr char kNoiseIdentifier[] =
     "Supercalifragilisticexpialidocious binbla";  // 41 bytes
 
 // ============================================================================

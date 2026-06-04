@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <vector>
@@ -18,9 +19,6 @@
 #include "types.hpp"
 
 namespace wg {
-
-constexpr char kMac1Label[] = "mac1----";
-constexpr char kCookieLabel[] = "cookie--";
 
 struct SendResult {
     bool ok = false;
@@ -37,8 +35,14 @@ class Sender {
     //
     // 它不管理 Peer/Keypair 生命周期，也不决定何时握手或重传。
    public:
+    using PacketLogger = std::function<void(std::span<const uint8_t>)>;
+
     explicit Sender(const PublicKey& local_static)
         : local_static_(local_static) {}
+
+    void set_packet_logger(PacketLogger logger) {
+        packet_logger_ = std::move(logger);
+    }
 
     // 为握手包计算 mac1 和 mac2。
     // mac1 的材料是msg和peer里面的预计算mac1_hash
@@ -79,6 +83,7 @@ class Sender {
 
    private:
     PublicKey local_static_{};
+    PacketLogger packet_logger_;
 };
 
 }  // namespace wg

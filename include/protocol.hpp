@@ -16,7 +16,6 @@
 
 namespace wg {
 
-constexpr const char kCookieLabel[] = "cookie--";  // 用作预计算
 class NoiseProtocol {
     // NoiseProtocol 负责 Noise 协议相关的所有状态和操作，包括：
     // - 本地长期密钥对（身份）
@@ -44,6 +43,7 @@ class NoiseProtocol {
 
     const PrivateKey& local_private() const { return local_private_; }
     const PublicKey& local_public() const { return local_public_; }
+    const Hash& precomputed_mac1_hash() const { return precomputed_mac1_hash_; }
     const Hash& precomputed_mac2_hash() const { return precomputed_mac2_hash_; }
     const Bytes32& secret_for_cookie() const { return secret_for_cookie_; }
 
@@ -93,8 +93,11 @@ class NoiseProtocol {
     ChainingKey base_chaining_key_{};
     Hash base_hash_{};
 
-    // Hash(kCookieLabel || S^{pub}) 自己的公钥
+    // HASH("mac1----" || S^{pub})
+    Hash precomputed_mac1_hash_{};
+    // Hash("cookie--" || S^{pub})
     Hash precomputed_mac2_hash_{};
+    // cookie 的生成材料，定时轮转
     Bytes32 secret_for_cookie_;
 
    private:

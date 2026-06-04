@@ -38,6 +38,36 @@ ReceiveResult result(ReceiveAction action, ReceiveError error,
     return r;
 }
 
+template <typename Message>
+bool Receiver::verify_mac1(const Message& msg,
+                           const Hash& precomputed_mac1_hash) const {
+    // 提取出mac1验证需要的部分：data 和 mac1
+    std::span<const uint8_t> data = bytes_until_mac1(msg);
+    std::span<const uint8_t> mac1 = as_bytes(&msg.mac1, sizeof(msg.mac1));
+    // 计算 expected_mac1
+    Mac expected_mac1{};
+    crypto::mac(data, precomputed_mac1_hash, expected_mac1);
+    // 比较
+    return crypto::constant_time_equal(mac1, expected_mac1);
+}
+
+template <typename Message>
+bool Receiver::verify_mac2(const Message& msg, const Endpoint& src,
+                           const Bytes32& secret_for_cookie) const {
+    // mac2 的验证需要用到 src endpoint 和 protocol 里预先计算的 hash
+    std::span<const uint8_t> data = bytes_until_mac2(msg);
+    std::span<const uint8_t> mac2 = as_bytes(&msg.mac2, sizeof(msg.mac2));
+    // 跟send相同的cookie构造方式
+    Cookie cookie{};
+    std::span<const uint8_t> addr = as_bytes(src.addr(), src.size());
+    crypto::mac(addr, secret_for_cookie, cookie);
+    // 计算 expected_mac2
+    Mac expected_mac2{};
+    crypto::mac(data, cookie, expected_mac2);
+    // 比较
+    return crypto::constant_time_equal(mac2, expected_mac2);
+}
+
 // 入口函数，负责识别消息类型并分发到对应的处理函数。
 // 1. 获取消息类型并验证基本长度
 // 2. 根据消息类型调用对应的 consume_* 函数
@@ -77,7 +107,7 @@ ReceiveResult Receiver::handle_packet(
                 return result(ReceiveAction::Drop, ReceiveError::ShortPacket,
                               src);
             }
-            return consume_cookie_reply(msg, src);
+            return consume_cookie_reply(msg, src, index_table);
         }
         case MessageType::TransportData: {
             TransportData msg{};
@@ -97,27 +127,19 @@ ReceiveResult Receiver::handle_packet(
 ReceiveResult Receiver::consume_initiation(UdpSocket& socket,
                                            NoiseProtocol& protocol,
                                            PeerManager& peers,
-                                           const HandshakeInitiation& msg,
+                                           HandshakeInitiation& msg,
                                            const Endpoint& src) {
-    if (!verify_mac1(msg)) {
+    if (!verify_mac1(msg, protocol.precomputed_mac1_hash())) {
         return result(ReceiveAction::Drop, ReceiveError::InvalidMac1, src);
     }
 
-    if (needs_mac2_validation() && !verify_mac2(msg, src)) {
-        CookieReply reply{};
-        if (!create_cookie_reply(msg.mac1, src, msg.sender_index, reply)) {
-            return result(ReceiveAction::Drop, ReceiveError::CryptoFailed, src);
-        }
-
-        const auto bytes = wire_bytes(reply);
-        const ssize_t sent = socket.send_bytes(bytes, src);
-        if (sent != static_cast<ssize_t>(bytes.size())) {
-            return result(ReceiveAction::Drop, ReceiveError::SocketFailed, src);
-        }
-        return result(ReceiveAction::SentCookieReply, ReceiveError::InvalidMac2,
-                      src);
+    if (needs_mac2_validation() &&
+        !verify_mac2(msg, src, protocol.secret_for_cookie())) {
+        return result(ReceiveAction::Drop, ReceiveError::InvalidMac2, src);
     }
-
+    // 反序列化
+    msg.sender_index = wg::wire::le_to_host32(msg.sender_index);
+    // 消费消息，找到对应的 peer。失败通常是因为未知的远程静态公钥。
     Peer* peer = protocol.consume_initiation(msg, peers);
     if (peer == nullptr) {
         return result(ReceiveAction::Drop, ReceiveError::UnknownPeer, src);
@@ -133,14 +155,18 @@ ReceiveResult Receiver::consume_initiation(UdpSocket& socket,
 ReceiveResult Receiver::consume_response(NoiseProtocol& protocol,
                                          PeerManager& peers,
                                          IndexTable& index_table,
-                                         const HandshakeResponse& msg,
+                                         HandshakeResponse& msg,
                                          const Endpoint& src) {
-    if (!verify_mac1(msg)) {
+    if (!verify_mac1(msg, protocol.precomputed_mac1_hash())) {
         return result(ReceiveAction::Drop, ReceiveError::InvalidMac1, src);
     }
-    if (needs_mac2_validation() && !verify_mac2(msg, src)) {
+    if (needs_mac2_validation() &&
+        !verify_mac2(msg, src, protocol.secret_for_cookie())) {
         return result(ReceiveAction::Drop, ReceiveError::InvalidMac2, src);
     }
+    // 反序列化
+    msg.sender_index = wg::wire::le_to_host32(msg.sender_index);
+    msg.receiver_index = wg::wire::le_to_host32(msg.receiver_index);
 
     Peer* peer = protocol.consume_response(msg, peers, index_table);
     if (peer == nullptr) {
@@ -153,16 +179,49 @@ ReceiveResult Receiver::consume_response(NoiseProtocol& protocol,
     out.peer = peer;
     return out;
 }
+ReceiveResult Receiver::consume_cookie_reply(CookieReply& msg,
+                                             const Endpoint& src,
+                                             IndexTable& index_table) {
+    // 反序列化
+    msg.receiver_index = wg::wire::le_to_host32(msg.receiver_index);
+    // 找到对应的
+    // keypair，通常是最近一次发起握手时用的那个。失败可能是因为过期的 cookie
+    // reply。
+    Keypair* keypair = index_table.find(msg.receiver_index);
+    if (keypair == nullptr) {
+        return result(ReceiveAction::Drop, ReceiveError::UnknownIndex, src);
+    }
 
+    // 取出之前的mac1
+    Mac expected_mac1 = keypair->last_mac1;
+    // 这个peer的预计算mac2 hash
+    Hash precomputed_mac2_hash = keypair->owner->precomputed_mac2_hash();
+    // 消息体里面的信息
+    XNonce nonce = msg.nonce;
+
+    Cookie cookie{};
+
+    // decrypt
+    crypto::xaead_decrypt(precomputed_mac2_hash, nonce, expected_mac1,
+                          msg.encrypted_cookie, cookie);
+    // 保存这个cookie到keypair里，供下一次发起握手时使用
+    keypair->last_cookie = cookie;
+
+    return result(ReceiveAction::ConsumedCookieReply, ReceiveError::None, src);
+}
 ReceiveResult Receiver::consume_transport(NoiseProtocol& protocol,
                                           IndexTable& index_table,
-                                          const TransportData& msg,
+                                          TransportData& msg,
                                           size_t ciphertext_size,
                                           const Endpoint& src,
                                           std::span<uint8_t> plaintext_out) {
     if (ciphertext_size < TAG_SIZE) {
         return result(ReceiveAction::Drop, ReceiveError::ShortPacket, src);
     }
+    // 反序列化
+    msg.header.receiver_index =
+        wg::wire::le_to_host32(msg.header.receiver_index);
+    msg.header.counter = wg::wire::le_to_host64(msg.header.counter);
 
     Keypair* keypair = index_table.find(msg.header.receiver_index);
     if (keypair == nullptr) {
@@ -187,10 +246,6 @@ ReceiveResult Receiver::consume_transport(NoiseProtocol& protocol,
     return out;
 }
 
-ReceiveResult Receiver::consume_cookie_reply(const CookieReply& msg,
-                                             const Endpoint& src) {
-    return result(ReceiveAction::ConsumedCookieReply, ReceiveError::None, src);
-}
 bool Receiver::parse_initiation(std::span<const uint8_t> packet,
                                 HandshakeInitiation& out) {
     if (packet.size() < sizeof(HandshakeInitiation)) {
