@@ -34,30 +34,11 @@ inline constexpr char kNoiseIdentifier[] =
 /// 语义：
 ///   base_chaining_key = HASH(kNoiseConstruction)
 ///   base_hash         = HASH(base_chaining_key || kNoiseIdentifier)
+///   base_hash_self    = HASH(base_hash || local_static)
 ///
-/// 该函数不混入 responder static public key。
 /// NoiseProtocol 可以在初始化时调用一次，并缓存输出。
-bool initialize_base(ChainingKey& base_chaining_key, Hash& base_hash);
-
-/// 从已缓存的 base 状态初始化一次握手。第三个公式
-///
-/// 语义：
-///   chaining_key = base_chaining_key
-///   hash         = base_hash
-///   hash         = HASH(hash || responder_static)
-///
-/// 对 initiator：
-///   responder_static = peer.remote_static()
-///
-/// 对 responder：
-///   responder_static = local_public
-///
-/// 注意：
-///   每次握手都应该复制 base_chaining_key / base_hash，
-///   不允许直接修改 NoiseProtocol 里缓存的 base 值。
-bool initialize_handshake_from_base(const Hash& base_hash,
-                                    const PublicKey& responder_static,
-                                    Hash& hash);
+bool initialize_base(ChainingKey& base_chaining_key, Hash& base_hash,
+                     Hash& base_hash_self);
 
 // ============================================================================
 // Transcript hash

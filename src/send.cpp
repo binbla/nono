@@ -39,8 +39,8 @@ bool Sender::fill_mac2(Message& msg, const Cookie& cookie) const {
 }
 
 bool Sender::serialize_transport(const TransportData& msg,
-                                  size_t plaintext_size,
-                                  std::vector<uint8_t>& out) {
+                                 size_t plaintext_size,
+                                 std::vector<uint8_t>& out) {
     if (plaintext_size > PAYLOAD_MAX_SIZE) {
         return false;
     }
@@ -51,8 +51,8 @@ bool Sender::serialize_transport(const TransportData& msg,
     std::memcpy(out.data(), reinterpret_cast<const void*>(&msg),
                 sizeof(TransportDataHeader));
     // 再拷贝实际加密数据
-    std::memcpy(out.data() + sizeof(TransportDataHeader), msg.encrypted_data.data(),
-                ciphertext_size);
+    std::memcpy(out.data() + sizeof(TransportDataHeader),
+                msg.encrypted_data.data(), ciphertext_size);
     return true;
 }
 
@@ -63,6 +63,7 @@ SendResult Sender::send_initiation(UdpSocket& socket, NoiseProtocol& protocol,
     if (!peer.endpoint()) {
         return {};
     }
+    Handshake& hs = peer.handshake();
     HandshakeInitiation msg{};
     // 填充协议层面消息内容
     protocol.create_initiation(peer, keypair, msg);
@@ -70,11 +71,11 @@ SendResult Sender::send_initiation(UdpSocket& socket, NoiseProtocol& protocol,
     msg.sender_index = wg::wire::host_to_le32(msg.sender_index);
     // 填充 mac1 和 mac2
     fill_mac1(msg, peer.precomputed_mac1_hash());
-    if (!crypto::is_all_zero(keypair.last_cookie)) {
-        fill_mac2(msg, keypair.last_cookie);
+    if (!crypto::is_all_zero(hs.last_cookie)) {
+        fill_mac2(msg, hs.last_cookie);
     }
 
-    keypair.last_mac1 = msg.mac1;
+    hs.last_mac1 = msg.mac1;
 
     const std::span<const uint8_t> bytes = wire_bytes(msg);
 
@@ -94,15 +95,16 @@ SendResult Sender::send_response(UdpSocket& socket, NoiseProtocol& protocol,
     HandshakeResponse msg{};
     // 填充消息
     protocol.create_response(peer, keypair, msg);
+    Handshake& hs = peer.handshake();
     // 序列化
     msg.sender_index = wg::wire::host_to_le32(keypair.local_index);
     msg.receiver_index = wg::wire::host_to_le32(keypair.remote_index);
     // 填充 mac1 和 mac2
     fill_mac1(msg, peer.precomputed_mac1_hash());
-    if (!crypto::is_all_zero(keypair.last_cookie)) {
-        fill_mac2(msg, keypair.last_cookie);
+    if (!crypto::is_all_zero(hs.last_cookie)) {
+        fill_mac2(msg, hs.last_cookie);
     }
-    keypair.last_mac1 = msg.mac1;
+    hs.last_mac1 = msg.mac1;
 
     const std::span<const uint8_t> bytes = wire_bytes(msg);
     if (packet_logger_) {

@@ -5,7 +5,8 @@
 
 // 仿造wg实现的Noise协议高级封装
 namespace wg::noise {
-bool initialize_base(ChainingKey& base_chaining_key, Hash& base_hash) {
+bool initialize_base(ChainingKey& base_chaining_key, Hash& base_hash,
+                     Hash& base_hash_self) {
     // 还得包装一下 常量字符串，转换成span传给crypto层的hash函数
     // 没关系，反正这个函数只调用一次，效率不是问题。
     std::span<const uint8_t> construction_span(
@@ -18,13 +19,8 @@ bool initialize_base(ChainingKey& base_chaining_key, Hash& base_hash) {
     wg::crypto::hash(construction_span, base_chaining_key);
     // H_i
     wg::crypto::hash_concat(base_chaining_key, identifier_span, base_hash);
-    return true;
-}
-bool initialize_handshake_from_base(const Hash& base_hash,
-                                    const PublicKey& responder_static,
-                                    Hash& hash) {
-    // H_i
-    wg::crypto::hash_concat(base_hash, responder_static, hash);
+    // H_i_self
+    wg::crypto::hash_concat(base_chaining_key, identifier_span, base_hash_self);
     return true;
 }
 

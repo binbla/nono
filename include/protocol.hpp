@@ -43,8 +43,12 @@ class NoiseProtocol {
 
     const PrivateKey& local_private() const { return local_private_; }
     const PublicKey& local_public() const { return local_public_; }
-    const Hash& precomputed_mac1_hash() const { return precomputed_mac1_hash_; }
-    const Hash& precomputed_mac2_hash() const { return precomputed_mac2_hash_; }
+    const Hash& precomputed_mac1_hash_self() const {
+        return precomputed_mac1_hash_self_;
+    }
+    const Hash& precomputed_mac2_hash_self() const {
+        return precomputed_mac2_hash_self_;
+    }
     const Bytes32& secret_for_cookie() const { return secret_for_cookie_; }
 
     // 返回预计算的 base_chaining_key 和 base_hash，供外部 handshake 初始化使用
@@ -90,23 +94,19 @@ class NoiseProtocol {
     PrivateKey local_private_{};
     PublicKey local_public_{};
 
-    ChainingKey base_chaining_key_{};
-    Hash base_hash_{};
+    ChainingKey base_chaining_key_{};  // hash(construction)
+    Hash base_hash_{};                 // hash(base_chaining_key || identifier)
+    Hash base_hash_self_{};            // hash(base_hash_ || local_static)
 
-    // HASH("mac1----" || S^{pub})
-    Hash precomputed_mac1_hash_{};
-    // Hash("cookie--" || S^{pub})
-    Hash precomputed_mac2_hash_{};
+    // HASH("mac1----" || S^{pub}_i)
+    Hash precomputed_mac1_hash_self_{};
+    // Hash("cookie--" || S^{pub}_i)
+    Hash precomputed_mac2_hash_self_{};
     // cookie 的生成材料，定时轮转
     Bytes32 secret_for_cookie_;
 
    private:
     // 内部辅助函数
-
-    bool initialize_initiator_handshake(Peer& peer, Handshake& hs) const;
-
-    bool initialize_responder_handshake(ChainingKey& ck, Hash& h) const;
-
     bool ready() const { return initialized_; }
 };
 

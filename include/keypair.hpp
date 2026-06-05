@@ -42,10 +42,6 @@ class Keypair {
     std::atomic<uint64_t> sending_counter = 0;
     std::atomic<uint64_t> receiving_counter = 0;
 
-    // 握手阶段的临时变量
-    Mac last_mac1{};
-    Cookie last_cookie{};
-
     // 是否是发起者
     bool i_am_the_initiator = false;  // 针对一些特有的行为逻辑
     // 像是resp方只有收到第一条消息才能发送data

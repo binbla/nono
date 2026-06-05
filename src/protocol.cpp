@@ -45,7 +45,8 @@ bool NoiseProtocol::initialize(const PrivateKey& local_private,
     local_private_ = local_private;
     local_public_ = local_public;
 
-    if (!wg::noise::initialize_base(base_chaining_key_, base_hash_)) {
+    if (!wg::noise::initialize_base(base_chaining_key_, base_hash_,
+                                    base_hash_self_)) {
         return false;
     }
     // 用作生成cookie的预计算材料，等价于 HASH(kCookieLabel || S^{pub})
@@ -55,12 +56,11 @@ bool NoiseProtocol::initialize(const PrivateKey& local_private,
         reinterpret_cast<const uint8_t*>(kCookieLabel),
         sizeof(kCookieLabel) - 1);
 
-    std::span<const uint8_t> local_public_span(local_public_.data(),
-                                               local_public_.size());
-    crypto::hash_concat(mac1_label_span, local_public_span,
-                        precomputed_mac1_hash_);
-    crypto::hash_concat(cookie_label_span, local_public_span,
-                        precomputed_mac2_hash_);
+    crypto::hash_concat(mac1_label_span, local_public_,
+                        precomputed_mac1_hash_self_);
+    crypto::hash_concat(cookie_label_span, local_public_,
+                        precomputed_mac2_hash_self_);
+    crypto::fill_random(secret_for_cookie_);  // 定时轮转
 
     initialized_ = true;
     return true;
@@ -77,6 +77,10 @@ void NoiseProtocol::clear() {
     wg::crypto::secure_zero(local_public_);
     wg::crypto::secure_zero(base_chaining_key_);
     wg::crypto::secure_zero(base_hash_);
+    wg::crypto::secure_zero(base_hash_self_);
+    wg::crypto::secure_zero(precomputed_mac1_hash_self_);
+    wg::crypto::secure_zero(precomputed_mac2_hash_self_);
+    wg::crypto::secure_zero(secret_for_cookie_);
     initialized_ = false;
 }
 
@@ -100,25 +104,30 @@ bool NoiseProtocol::create_initiation(Peer& peer, Keypair& keypair,
     msg.mac1.fill(0);  // 这个交给上层去算
     msg.mac2.fill(0);
 
+    // keipair的初始化应该在外面做
+
     // 1-3
     Handshake& hs = peer.handshake();
     hs.clear_runtime();
-    hs.chaining_key = base_chaining_key_;
-    hs.hash = peer.base_hash();
+    // 运行时的ck和h (临时变量最后才保存，msg填写内容则立马更新)
+    PrivateKey ephemeral_private{};
+    ChainingKey chaining_key = base_chaining_key_;
+    Hash hash = peer.base_hash_peer();
 
     // 4
-    if (!crypto::generate_ephemeral_keypair(hs.ephemeral_private,     // Epriv_i
+    // 这里直接把hs.ephemeral_private填好
+    if (!crypto::generate_ephemeral_keypair(ephemeral_private,        // Epriv_i
                                             msg.ephemeral_public)) {  // Epub_i
         return false;
     }
 
     // 5-7（mix 自己的临时公钥）
-    noise::mix_ephemeral(msg.ephemeral_public, hs.chaining_key, hs.hash);
+    noise::mix_ephemeral(msg.ephemeral_public, chaining_key, hash);
 
     SymmetricKey key{};
     // 8 es
-    if (!noise::mix_dh(hs.chaining_key, key,
-                       hs.ephemeral_private,     // Epriv_i
+    if (!noise::mix_dh(chaining_key, key,
+                       ephemeral_private,        // Epriv_i
                        peer.remote_static())) {  // Spub_r
         crypto::secure_zero(key);
         return false;
@@ -127,14 +136,14 @@ bool NoiseProtocol::create_initiation(Peer& peer, Keypair& keypair,
     // 9-10
     if (!noise::encrypt_and_hash(msg.static_encrypted,
                                  local_public_,  // Spub_i
-                                 key, hs.hash)) {
+                                 key, hash)) {
         crypto::secure_zero(key);
         return false;
     }
 
     // 11 ss
     // 自己的Epriv和对方的Epub，得到的key会被后续的timestamp加密覆盖掉，不直接用于AEAD）
-    if (!noise::mix_precomputed_dh(hs.chaining_key, key,
+    if (!noise::mix_precomputed_dh(chaining_key, key,
                                    peer.precomputed_static_static())) {
         crypto::secure_zero(key);
         return false;
@@ -144,14 +153,17 @@ bool NoiseProtocol::create_initiation(Peer& peer, Keypair& keypair,
     Timestamp timestamp = keypair.created_at;
 
     if (!noise::encrypt_and_hash(msg.timestamp_encrypted, timestamp.bytes(),
-                                 key, hs.hash)) {
+                                 key, hash)) {
         crypto::secure_zero(key);
         return false;
     }
 
     // 保存握手状态
+    hs.ephemeral_private = ephemeral_private;
     hs.local_index = keypair.local_index;
     hs.state = HandshakeState::CreatedInitiation;
+    hs.latest_timestamp = timestamp;
+    // mac1和cookie都在上层计算，协议层不关心
     crypto::secure_zero(key);
     return true;
 }
@@ -159,23 +171,24 @@ bool NoiseProtocol::create_initiation(Peer& peer, Keypair& keypair,
 Peer* NoiseProtocol::consume_initiation(const HandshakeInitiation& msg,
                                         PeerManager& peers) {
     if (!initialized_) return nullptr;
-
+    // 正常从消息中解析出这些字段
+    PublicKey ephemeral_public{};
     SymmetricKey key{};
     PublicKey remote_static{};
     Timestamp timestamp{};
 
-    // 初始化临时 hash / chaining_key
-    Hash hash = base_hash_;
+    // 初始化
     ChainingKey chaining_key = base_chaining_key_;
+    Hash hash = base_hash_self_;
 
     // 1. 获取 msg.ephemeral
-    const PublicKey& ephemeral = msg.ephemeral_public;
+    ephemeral_public = msg.ephemeral_public;
 
     // mix ephemeral
-    noise::mix_ephemeral(ephemeral, chaining_key, hash);
+    noise::mix_ephemeral(ephemeral_public, chaining_key, hash);
 
     // 2. es = DH(local_static_private, msg.ephemeral)
-    if (!noise::mix_dh(chaining_key, key, local_private_, ephemeral)) {
+    if (!noise::mix_dh(chaining_key, key, local_private_, ephemeral_public)) {
         crypto::secure_zero(key);
         return nullptr;
     }
@@ -226,9 +239,7 @@ Peer* NoiseProtocol::consume_initiation(const HandshakeInitiation& msg,
     }
 
     // 7. 更新 peer.handshake 状态
-    hs.remote_ephemeral = ephemeral;
-    hs.chaining_key = chaining_key;
-    hs.hash = hash;
+    hs.remote_ephemeral = ephemeral_public;
     hs.latest_timestamp = timestamp;  // init方的创建时间
     hs.remote_index = msg.sender_index;
     hs.last_initiation_consumption_ns = now_ns;  // 消费 initiation 的时间
@@ -236,7 +247,6 @@ Peer* NoiseProtocol::consume_initiation(const HandshakeInitiation& msg,
 
     crypto::secure_zero(key);
     return peer;
-    // 上层要根据返回情况，分配一个新的keypair，并调用create_response来生成响应消息
 }
 // ================================================================
 // NoiseProtocol::handshake responder
@@ -253,65 +263,76 @@ bool NoiseProtocol::create_response(Peer& peer, Keypair& keypair,
     msg.receiver_index = hs.remote_index;
     msg.ephemeral_public.fill(0);  // 明文
     msg.empty_encrypted.fill(0);
-    msg.mac1.fill(0);  // 这个交给上层去算
+    msg.mac1.fill(0);
     msg.mac2.fill(0);
 
+    PrivateKey ephemeral_private{};
+    ChainingKey chaining_key = base_chaining_key_;
+    Hash hash = peer.base_hash_peer();
+
     // 1. 生成 ephemeral keypair
-    if (!crypto::generate_ephemeral_keypair(hs.ephemeral_private,     // Epriv_r
+    if (!crypto::generate_ephemeral_keypair(ephemeral_private,        // Epriv_r
                                             msg.ephemeral_public)) {  // Epub_r
         return false;
     }
 
     // 2. mix_ephemeral
-    noise::mix_ephemeral(msg.ephemeral_public, hs.chaining_key, hs.hash);
+    noise::mix_ephemeral(msg.ephemeral_public, chaining_key, hash);
 
     // 3. DH响应方的ephemeral和发起方的ephemeral ee
     SymmetricKey key{};
-    if (!noise::mix_dh(hs.chaining_key, key,
-                       hs.ephemeral_private,    // Epriv_r
+    if (!noise::mix_dh(chaining_key, key,
+                       ephemeral_private,       // Epriv_r
                        hs.remote_ephemeral)) {  // Epub_i
         crypto::secure_zero(key);
         return false;
     }  // 这里输出的 k 不直接用于 AEAD，随后会被 se/psk 步骤覆盖。
 
     // 4. mix_dh响应方的ephemeral和发起方的静态 se
-    if (!noise::mix_dh(hs.chaining_key, key,
-                       hs.ephemeral_private,     // Epriv_r
+    if (!noise::mix_dh(chaining_key, key,
+                       ephemeral_private,        // Epriv_r
                        peer.remote_static())) {  // Spub_i
         crypto::secure_zero(key);
         return false;
     }
 
     // 5. mix_psk 如果有预共享密钥的话 这里得到的key是要使用的
-    noise::mix_psk(hs.chaining_key, hs.hash, key, peer.preshared_key());
+    noise::mix_psk(chaining_key, hash, key, peer.preshared_key());
 
     // 6. encrypt_and_hash 空消息
     if (!noise::encrypt_and_hash(msg.empty_encrypted,
-                                 /*plaintext=*/{}, key, hs.hash)) {
+                                 /*plaintext=*/{}, key, hash)) {
         crypto::secure_zero(key);
         return false;
     }
     crypto::secure_zero(key);
+
+    hs.ephemeral_private = ephemeral_private;
+    hs.local_index = keypair.local_index;
+    hs.state = HandshakeState::CreatedResponse;
     return true;
 }
+
 Peer* NoiseProtocol::consume_response(const HandshakeResponse& msg,
                                       PeerManager& peers,
                                       IndexTable& index_table) {
     if (!initialized_) return nullptr;
-    (void)peers;
     // 1. 找到对应的keypair和对方生成的ephemeral key
     Keypair* keypair = index_table.find(msg.receiver_index);
     if (!keypair) {
         return nullptr;
     }
+    // 这里要不要判断一下keypair的状态？
+    // keypair自创建的时候就注册一个定时事件，如果keypair过期了这个定时事件就会把它删掉，就会找不到
     Peer* peer = keypair->owner;
     Handshake& hs = peer->handshake();
-    // 这个消息还没有经过验证，不能完全信任里面的内容，所以先不更新hs.remote_index和hs.remote_ephemeral，等验证通过后再更新
 
     KeypairIndex remote_index = msg.sender_index;
     PublicKey remote_ephemeral = msg.ephemeral_public;
-    ChainingKey chaining_key = hs.chaining_key;
-    Hash hash = hs.hash;
+
+    ChainingKey chaining_key = base_chaining_key_;
+    Hash hash = peer->base_hash_peer();
+
     // 2. mix_ephemeral
     noise::mix_ephemeral(msg.ephemeral_public, chaining_key, hash);
     // 3. mix_dh ee
@@ -337,13 +358,10 @@ Peer* NoiseProtocol::consume_response(const HandshakeResponse& msg,
         return nullptr;
     }
     // 7. 更新握手状态
-    hs.chaining_key = chaining_key;
-    hs.hash = hash;
     hs.remote_index = remote_index;
     hs.remote_ephemeral = remote_ephemeral;
     hs.state = HandshakeState::ConsumedResponse;
     return peer;
-    // keypair 的更新交给上层
 }
 
 // ================================================================
@@ -371,7 +389,6 @@ bool NoiseProtocol::create_datatrans(Keypair& keypair,
     msg.header.reserved[1] = 0;
     msg.header.reserved[2] = 0;
     msg.header.receiver_index = keypair.remote_index;
-    // 对方只要能找到keypair就能知道是谁发的了，不需要sender_index了
     msg.header.counter = counter;
 
     Nonce nonce = nonce_from_counter(counter);
@@ -421,6 +438,17 @@ bool NoiseProtocol::consume_datatrans(IndexTable& index_table,
 
     keypair->last_used_at = Timestamp::now();
     return true;
+}
+
+void NoiseProtocol::rotate_secret_for_cookie() {
+    Bytes32 next_secret{};
+    if (!crypto::fill_random(next_secret)) {
+        return;
+    }
+
+    crypto::secure_zero(secret_for_cookie_);
+    secret_for_cookie_ = next_secret;
+    crypto::secure_zero(next_secret);
 }
 
 }  // namespace wg

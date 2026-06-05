@@ -25,6 +25,24 @@ class PeerManager {
         return it == peers_.end() ? nullptr : it->second.get();
     }
 
+    Peer* find_by_endpoint(const Endpoint& endpoint) {
+        for (auto& [_, peer] : peers_) {
+            if (peer->endpoint() && *peer->endpoint() == endpoint) {
+                return peer.get();
+            }
+        }
+        return nullptr;
+    }
+
+    const Peer* find_by_endpoint(const Endpoint& endpoint) const {
+        for (const auto& [_, peer] : peers_) {
+            if (peer->endpoint() && *peer->endpoint() == endpoint) {
+                return peer.get();
+            }
+        }
+        return nullptr;
+    }
+
     bool contains(const PublicKey& key) const {
         return peers_.find(key) != peers_.end();
     }

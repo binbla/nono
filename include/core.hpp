@@ -1,5 +1,8 @@
 #ifndef CORE_HPP
 #define CORE_HPP
+#include <functional>
+#include <span>
+
 #include "endpoint.hpp"
 #include "index_table.hpp"
 #include "peer.hpp"
@@ -7,6 +10,7 @@
 #include "protocol.hpp"
 #include "receive.hpp"
 #include "send.hpp"
+#include "timer.hpp"
 #include "types.hpp"
 namespace wg {
 // 协议栈的最高层，负责管理Peer和Keypair的生命周期，决定何时发起握手，何时重传，何时发数据包等
@@ -86,6 +90,10 @@ class Core {
 
     void tick();
 
+    void register_default_timers();
+
+    TimerManager& timers();
+
     // ------------------------------------------------------------
     // 资源访问，给内部模块或测试使用
     // ------------------------------------------------------------
@@ -93,6 +101,13 @@ class Core {
     PeerManager& peer_manager();
     IndexTable& index_table();
     NoiseProtocol& protocol();
+
+   private:
+    PeerManager peer_manager_;
+    IndexTable index_table_;
+    NoiseProtocol protocol_;
+    TimerManager timers_;
+    bool running_ = false;
 };
 }  // namespace wg
 #endif  // CORE_HPP

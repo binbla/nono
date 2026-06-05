@@ -129,7 +129,7 @@ ReceiveResult Receiver::consume_initiation(UdpSocket& socket,
                                            PeerManager& peers,
                                            HandshakeInitiation& msg,
                                            const Endpoint& src) {
-    if (!verify_mac1(msg, protocol.precomputed_mac1_hash())) {
+    if (!verify_mac1(msg, protocol.precomputed_mac1_hash_self())) {
         return result(ReceiveAction::Drop, ReceiveError::InvalidMac1, src);
     }
 
@@ -157,7 +157,7 @@ ReceiveResult Receiver::consume_response(NoiseProtocol& protocol,
                                          IndexTable& index_table,
                                          HandshakeResponse& msg,
                                          const Endpoint& src) {
-    if (!verify_mac1(msg, protocol.precomputed_mac1_hash())) {
+    if (!verify_mac1(msg, protocol.precomputed_mac1_hash_self())) {
         return result(ReceiveAction::Drop, ReceiveError::InvalidMac1, src);
     }
     if (needs_mac2_validation() &&
@@ -191,9 +191,10 @@ ReceiveResult Receiver::consume_cookie_reply(CookieReply& msg,
     if (keypair == nullptr) {
         return result(ReceiveAction::Drop, ReceiveError::UnknownIndex, src);
     }
+    Handshake& hs = keypair->owner->handshake();
 
     // 取出之前的mac1
-    Mac expected_mac1 = keypair->last_mac1;
+    Mac expected_mac1 = hs.last_mac1;
     // 这个peer的预计算mac2 hash
     Hash precomputed_mac2_hash = keypair->owner->precomputed_mac2_hash();
     // 消息体里面的信息
@@ -205,7 +206,7 @@ ReceiveResult Receiver::consume_cookie_reply(CookieReply& msg,
     crypto::xaead_decrypt(precomputed_mac2_hash, nonce, expected_mac1,
                           msg.encrypted_cookie, cookie);
     // 保存这个cookie到keypair里，供下一次发起握手时使用
-    keypair->last_cookie = cookie;
+    hs.last_cookie = cookie;
 
     return result(ReceiveAction::ConsumedCookieReply, ReceiveError::None, src);
 }
