@@ -307,6 +307,16 @@ bool NoiseProtocol::create_response(Peer& peer, Keypair& keypair,
     }
     crypto::secure_zero(key);
 
+    SymmetricKey sending{};
+    SymmetricKey receiving{};
+    noise::derive_transport_keys(chaining_key, receiving, sending);
+    keypair.remote_index = hs.remote_index;
+    keypair.set_sending(sending);
+    keypair.set_receiving(receiving);
+    crypto::secure_zero(sending);
+    crypto::secure_zero(receiving);
+    crypto::secure_zero(chaining_key);
+
     hs.ephemeral_private = ephemeral_private;
     hs.local_index = keypair.local_index;
     hs.state = HandshakeState::CreatedResponse;
@@ -357,6 +367,18 @@ Peer* NoiseProtocol::consume_response(const HandshakeResponse& msg,
         crypto::secure_zero(key);
         return nullptr;
     }
+    crypto::secure_zero(key);
+
+    SymmetricKey sending{};
+    SymmetricKey receiving{};
+    noise::derive_transport_keys(chaining_key, sending, receiving);
+    keypair->remote_index = remote_index;
+    keypair->set_sending(sending);
+    keypair->set_receiving(receiving);
+    crypto::secure_zero(sending);
+    crypto::secure_zero(receiving);
+    crypto::secure_zero(chaining_key);
+
     // 7. 更新握手状态
     hs.remote_index = remote_index;
     hs.remote_ephemeral = remote_ephemeral;

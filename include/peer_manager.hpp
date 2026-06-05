@@ -55,23 +55,8 @@ class PeerManager {
         return ref;
     }
 
-    // 接管外部已经构造好的 Peer；nullptr 会被忽略。
-    // 返回值是最终保存在 manager 里的对象指针。
-    Peer* add_peer(std::unique_ptr<Peer> peer) {
-        if (!peer) {
-            return nullptr;
-        }
-
-        const PublicKey key = peer->remote_static();
-        Peer* raw = peer.get();
-        peers_[key] = std::move(peer);
-        return raw;
-    }
-
     // 返回 true 表示确实删除了一个 peer。
-    bool remove_peer(const PublicKey& key) {
-        return peers_.erase(key) != 0;
-    }
+    bool remove_peer(const PublicKey& key) { return peers_.erase(key) != 0; }
 
     void clear() { peers_.clear(); }
 

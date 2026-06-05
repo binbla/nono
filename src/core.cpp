@@ -55,8 +55,7 @@ Peer* Core::add_peer(const PublicKey& remote_static, const Endpoint& endpoint,
     };
     Peer& peer = peer_manager_.add_peer(config);
     if (protocol_.initialized() &&
-        !peer.initialize_crypto_state(protocol_.local_private(),
-                                      protocol_.base_hash())) {
+        !peer.initialize(protocol_.local_private(), protocol_.base_hash())) {
         peer_manager_.remove_peer(remote_static);
         return nullptr;
     }
@@ -96,9 +95,10 @@ void Core::tick() { timers_.poll(); }
 
 void Core::register_default_timers() {
     timers_.clear();
-    timers_.schedule_every(std::chrono::minutes(2),
-                           [this] { protocol_.rotate_secret_for_cookie(); },
-                           "protocol.cookie_secret.rotate");
+    timers_.schedule_every(
+        std::chrono::minutes(2),
+        [this] { protocol_.rotate_secret_for_cookie(); },
+        "protocol.cookie_secret.rotate");
 }
 
 TimerManager& Core::timers() { return timers_; }

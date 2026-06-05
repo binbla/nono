@@ -137,8 +137,8 @@ SendResult Sender::send_cookie_reply(UdpSocket& socket, NoiseProtocol& protocol,
     // ad : mac1
     // plaintext : cookie
     // ciphertext : out.encrypted_cookie
-    crypto::xaead_encrypt(protocol.precomputed_mac2_hash(), msg.nonce, mac1,
-                          cookie, msg.encrypted_cookie);
+    crypto::xaead_encrypt(protocol.precomputed_mac2_hash_self(), msg.nonce,
+                          mac1, cookie, msg.encrypted_cookie);
     // 发送之前序列化。注意顺序
     msg.receiver_index = wg::wire::host_to_le32(receiver_index);
 

@@ -41,7 +41,7 @@ class Peer {
     */
 
    public:
-    explicit Peer(const PeerConfig& config, const NoiseProtocol& protocol)
+    explicit Peer(const PeerConfig& config)
         : remote_static_(config.remote_static),
           preshared_key_(config.preshared_key),
           endpoint_(config.endpoint) {
@@ -56,12 +56,15 @@ class Peer {
         crypto::hash_concat(mac1label, remote_static_, precomputed_mac1_hash_);
         crypto::hash_concat(cookie_label_span, remote_static_,
                             precomputed_mac2_hash_);
+    }
+
+    // 初始化需要protocol信息的字段
+    bool initialize(const PrivateKey& local_private, const Hash& base_hash) {
         // ss
-        crypto::dh(protocol.local_private(), remote_static_,
-                   precomputed_static_static_);
+        crypto::dh(local_private, remote_static_, precomputed_static_static_);
         // 预计算的base_hash_peer_，也就是HASH(base_hash || remote_static)
-        crypto::hash_concat(protocol.base_hash(), remote_static_,
-                            base_hash_peer_);
+        crypto::hash_concat(base_hash, remote_static_, base_hash_peer_);
+        return true;
     }
 
     // identity
@@ -89,7 +92,6 @@ class Peer {
     KeypairManager& keypairs() { return keypairs_; }
 
    private:
-    // peer 的长期身份信息 自己存一个
     PublicKey remote_static_{};
     PreSharedKey preshared_key_{};
     std::optional<Endpoint> endpoint_;
