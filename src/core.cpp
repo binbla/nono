@@ -206,8 +206,10 @@ SendResult Core::retry_handshake(const PublicKey& remote_static) {
 // ============================================================================
 
 ReceiveResult Core::poll_once() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // Timer 回调允许调用 Core 的发送接口，因此不能在持有 Core mutex 时执行。
     tick();
+
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!socket_ || !receiver_) {
         return {};
     }

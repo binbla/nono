@@ -1,3 +1,5 @@
+#include "core.hpp"
+
 #include <array>
 #include <cctype>
 #include <cstdint>
@@ -5,9 +7,9 @@
 #include <span>
 #include <string>
 
-#include "core.hpp"
 #include "endpoint.hpp"
 #include "logger.hpp"
+#include "reliable.hpp"
 #include "types.hpp"
 
 namespace {
@@ -53,7 +55,7 @@ void print_menu() {
     std::cout << "\n"
               << "1. normal handshake\n"
               << "2. toggle cookie reply requirement for incoming handshakes\n"
-              << "3. send message\n"
+              << "3. send reliable message\n"
               << "4. show my public key\n"
               << "5. retry last handshake packet\n"
               << "q. quit\n"
@@ -95,7 +97,8 @@ int main(int argc, char** argv) {
     }
 
     const uint16_t peer_port = port == 40001 ? 40002 : 40001;
-    wg::Endpoint peer_endpoint = wg::Endpoint::from_ipv4("127.0.0.1", peer_port);
+    wg::Endpoint peer_endpoint =
+        wg::Endpoint::from_ipv4("127.0.0.1", peer_port);
     wg::Peer* peer = core.add_peer(peer_key, peer_endpoint);
     if (peer == nullptr) {
         std::cerr << "failed to add peer\n";
@@ -103,11 +106,21 @@ int main(int argc, char** argv) {
     }
 
     wg::Logger& logger = wg::Logger::default_logger();
-    core.set_packet_callback([](wg::Peer&, std::span<const uint8_t> packet) {
-        std::string text(packet.begin(), packet.end());
-        wg::Logger::default_logger().info("APP RX plaintext=\"" + text + "\"");
-        std::cout << "> " << std::flush;
-    });
+    wg::ReliableConfig config;
+    config.set_mtu(1500)
+        .set_window(128, 128)
+        .set_nodelay(1, 10, 2, 1)
+        .set_min_rto(10)
+        .set_flush_after_send(true)
+        .set_register_timer(true);
+    wg::ReliableManager reliable(core, config);
+    reliable.set_message_callback(
+        [](wg::Peer&, std::span<const uint8_t> packet) {
+            std::string text(packet.begin(), packet.end());
+            wg::Logger::default_logger().info("APP RELIABLE RX plaintext=\"" +
+                                              text + "\"");
+            std::cout << "> " << std::flush;
+        });
     logger.info("logger ready");
 
     if (!core.start()) {
@@ -135,20 +148,18 @@ int main(int argc, char** argv) {
             core.set_force_cookie_reply(require_cookie);
             std::cout << "incoming cookie reply requirement: "
                       << (require_cookie ? "on" : "off") << "\n";
-            std::cout << "To test cookie handshake, turn this on here, then run "
-                         "option 1 on the other instance.\n";
+            std::cout
+                << "To test cookie handshake, turn this on here, then run "
+                   "option 1 on the other instance.\n";
         } else if (choice == "3") {
             std::cout << "message: " << std::flush;
             std::string message;
             std::getline(std::cin, message);
-            wg::SendResult r =
-                core.send_to_peer(*peer, std::span<const uint8_t>(
-                                             reinterpret_cast<const uint8_t*>(
-                                                 message.data()),
-                                             message.size()));
-            std::cout << (r.ok ? "message sent\n"
-                               : "no active session; handshake started or send "
-                                 "failed, retry after handshake\n");
+            wg::ReliableSendResult r = reliable.send(
+                *peer, std::span<const uint8_t>(
+                           reinterpret_cast<const uint8_t*>(message.data()),
+                           message.size()));
+            std::cout << (r.ok ? "message sent\n" : "reliable send failed\n");
         } else if (choice == "4") {
             std::cout << "my public key(hex): " << to_hex(core.local_public())
                       << "\n";
