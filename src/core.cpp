@@ -9,15 +9,27 @@
 
 namespace wg {
 namespace {
+
+// 后台循环的最大睡眠时间。TimerManager 可能要求更早醒来。
 constexpr auto kDefaultPollSleep = std::chrono::milliseconds(10);
-}
+
+}  // namespace
 
 Core::Core() = default;
 
 Core::~Core() { stop(); }
 
+// ============================================================================
+// Lifecycle
+// ============================================================================
+
 bool Core::initialize(const PrivateKey& local_private,
                       const PublicKey& local_public) {
+    // Core 初始化的顺序很重要：
+    // 1. 初始化 crypto/provider。
+    // 2. 初始化 NoiseProtocol 的本地身份和预计算 hash。
+    // 3. 用本地公钥构造 sender/receiver。
+    // 4. 注册默认计时器。start() 之后后台循环会持续 poll 它们。
     if (!crypto::init()) {
         return false;
     }
@@ -45,6 +57,8 @@ bool Core::generate_identity_and_initialize() {
 }
 
 bool Core::bind(const Endpoint& local_endpoint) {
+    // UdpSocket 当前按端口监听所有地址。传入 Endpoint 是为了保留未来按
+    // 地址族/本地地址绑定的 API 形状。
     if (!protocol_.initialized() || local_endpoint.port() == 0) {
         return false;
     }
@@ -59,6 +73,8 @@ bool Core::bind(const Endpoint& local_endpoint) {
 }
 
 bool Core::start() {
+    // start() 只负责启动事件循环。没有 socket 或协议未初始化时，不创建半工作
+    // 状态，直接失败。
     if (running_.load(std::memory_order_acquire)) {
         return true;
     }
@@ -81,8 +97,13 @@ bool Core::running() const { return running_.load(std::memory_order_acquire); }
 
 const PublicKey& Core::local_public() const { return protocol_.local_public(); }
 
+// ============================================================================
+// Peer Registry
+// ============================================================================
+
 Peer* Core::add_peer(const PublicKey& remote_static, const Endpoint& endpoint,
                      const PreSharedKey& psk) {
+    // Peer 构造时只知道对端身份；依赖本地私钥的预计算材料要在这里补齐。
     PeerConfig config{
         .remote_static = remote_static,
         .preshared_key = psk,
@@ -109,12 +130,18 @@ Peer* Core::find_peer_by_endpoint(const Endpoint& endpoint) {
     return peer_manager_.find_by_endpoint(endpoint);
 }
 
+// ============================================================================
+// Sending and Handshake Entry Points
+// ============================================================================
+
 SendResult Core::send_to_peer(Peer& peer, std::span<const uint8_t> packet) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!socket_ || !sender_) {
         return {};
     }
 
+    // Core 不缓存业务明文。没有可用会话时，先发 initiation，调用方在握手
+    // 完成后再次调用 send_to_peer()。
     Keypair* current = peer.keypairs().current().get();
     if (current == nullptr || !current->is_valid()) {
         return initiate_handshake(peer);
@@ -157,6 +184,8 @@ SendResult Core::retry_handshake(Peer& peer) {
         return {};
     }
 
+    // CookieReply 只保存 cookie，不自动重发。调用方显式 retry 时，Core 根据
+    // pending keypair 的角色选择重发哪种握手包。
     Keypair* pending = peer.keypairs().next().get();
     if (pending != nullptr && !pending->i_am_the_initiator) {
         return resend_response(peer, *pending);
@@ -172,6 +201,10 @@ SendResult Core::retry_handshake(const PublicKey& remote_static) {
     return retry_handshake(*peer);
 }
 
+// ============================================================================
+// Receive Pump
+// ============================================================================
+
 ReceiveResult Core::poll_once() {
     std::lock_guard<std::mutex> lock(mutex_);
     tick();
@@ -179,6 +212,8 @@ ReceiveResult Core::poll_once() {
         return {};
     }
 
+    // 单次读取一个 UDP datagram。后台循环会反复调用本函数；需要高吞吐时可以
+    // 在这里改成 drain-until-EAGAIN 的批处理模型。
     std::array<uint8_t, UdpSocket::recv_buffer_size> packet{};
     std::array<uint8_t, PAYLOAD_MAX_SIZE> plaintext{};
     Endpoint src;
@@ -196,6 +231,10 @@ ReceiveResult Core::poll_once() {
                                          result.plaintext_size));
     return result;
 }
+
+// ============================================================================
+// Timers and Options
+// ============================================================================
 
 void Core::tick() { timers_.poll(); }
 
@@ -222,6 +261,10 @@ IndexTable& Core::index_table() { return index_table_; }
 
 NoiseProtocol& Core::protocol() { return protocol_; }
 
+// ============================================================================
+// Callbacks and Diagnostics
+// ============================================================================
+
 void Core::set_packet_callback(PacketCallback cb) {
     std::lock_guard<std::mutex> lock(mutex_);
     packet_callback_ = std::move(cb);
@@ -244,6 +287,10 @@ void Core::set_logger(Logger* logger) {
     logger_ = logger != nullptr ? logger : &Logger::default_logger();
 }
 
+// ============================================================================
+// Internal Keypair / Index Management
+// ============================================================================
+
 KeypairIndex Core::allocate_index() {
     std::array<uint8_t, sizeof(KeypairIndex)> bytes{};
     for (;;) {
@@ -261,6 +308,8 @@ KeypairIndex Core::allocate_index() {
 }
 
 Keypair* Core::install_next_keypair(Peer& peer, bool i_am_the_initiator) {
+    // KeypairManager 只拥有 current/previous/next 三槽；IndexTable 只保存非拥有
+    // 指针用于收包定位。每次挤掉旧 next 时必须同步移除旧 index。
     const KeypairIndex local_index = allocate_index();
     if (local_index == 0) {
         return nullptr;
@@ -278,6 +327,8 @@ Keypair* Core::install_next_keypair(Peer& peer, bool i_am_the_initiator) {
 }
 
 SendResult Core::initiate_handshake(Peer& peer) {
+    // 发起方每次 initiation 都安装一个新的 next keypair。若发送失败，移除
+    // index_table_ 中刚注册的映射，避免留下不可达的 receiver index。
     Keypair* keypair = install_next_keypair(peer, true);
     if (keypair == nullptr || !sender_) {
         return {};
@@ -292,11 +343,18 @@ SendResult Core::initiate_handshake(Peer& peer) {
 }
 
 SendResult Core::resend_response(Peer& peer, Keypair& keypair) {
+    // responder 收到 CookieReply 后复用原 responder keypair 重发 response。
+    // 这里不重新安装 keypair，否则 sender/receiver index 会变，initiator
+    // 收到 response 时就找不到原先等待中的 keypair。
     if (!sender_ || !socket_) {
         return {};
     }
     return sender_->send_response(*socket_, protocol_, peer, keypair);
 }
+
+// ============================================================================
+// Receive Result Orchestration
+// ============================================================================
 
 void Core::handle_receive_result(const ReceiveResult& result,
                                  std::span<const uint8_t> plaintext) {
@@ -310,6 +368,9 @@ void Core::handle_receive_result(const ReceiveResult& result,
 
     switch (result.action) {
         case ReceiveAction::ConsumedInitiation: {
+            // responder 路径：已验证并消费 initiation，创建 responder keypair，
+            // 立即回 response。若对端也要求 mac2，它会回 CookieReply；本端只保存
+            // cookie，等待上层调用 retry_handshake()。
             if (result.peer == nullptr) {
                 return;
             }
@@ -326,6 +387,7 @@ void Core::handle_receive_result(const ReceiveResult& result,
             return;
         }
         case ReceiveAction::ConsumedResponse: {
+            // initiator 路径：response 认证通过，next keypair 正式升为 current。
             if (result.peer == nullptr) {
                 return;
             }
@@ -336,6 +398,8 @@ void Core::handle_receive_result(const ReceiveResult& result,
             return;
         }
         case ReceiveAction::ConsumedCookieReply: {
+            // 只保存 cookie，不自动重发。自动重发会让上层难以控制握手节奏，
+            // 也不利于测试双端 cookie challenge 的中间状态。
             if (logger_) {
                 logger_->debug(
                     "cookie reply consumed; waiting for manual retry");
@@ -343,6 +407,8 @@ void Core::handle_receive_result(const ReceiveResult& result,
             return;
         }
         case ReceiveAction::ConsumedTransport: {
+            // responder 的 keypair 在收到第一条 transport 后才激活并轮转到
+            // current。这与 WireGuard 的“响应方首包确认”语义一致。
             if (result.peer != nullptr && result.keypair != nullptr &&
                 result.peer->keypairs().next().get() == result.keypair) {
                 const KeypairIndex evicted = result.peer->keypairs().rotate();
@@ -359,6 +425,10 @@ void Core::handle_receive_result(const ReceiveResult& result,
             return;
     }
 }
+
+// ============================================================================
+// Background Loop
+// ============================================================================
 
 void Core::run_loop() {
     while (running_.load(std::memory_order_acquire)) {
