@@ -19,7 +19,7 @@ struct Handshake {
     HandshakeState state = HandshakeState::Zeroed;
 
     KeypairIndex local_index = 0;   // 本端索引
-    KeypairIndex remote_index = 0;  // 对端索引：对方包里的 sender_index
+    KeypairIndex remote_index = 0;  // 对端索引
 
     // 在clear_runtime的时候会被清空
     PrivateKey ephemeral_private{};  // 本地临时私钥
@@ -41,9 +41,8 @@ struct Handshake {
     void clear_runtime() {
         ephemeral_private.fill(0);
         remote_ephemeral.fill(0);
-        last_mac1.fill(0);
-        last_cookie.fill(0);
-
+        // last_mac1.fill(0);
+        // last_cookie.fill(0);
         // latest_timestamp.clear();
         last_initiation_consumption_ns.clear();
 

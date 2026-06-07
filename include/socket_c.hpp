@@ -165,6 +165,17 @@ class UdpSocket {
     RecvCallback recv_cb_;
 
     void open_and_bind(uint16_t port) {
+        try {
+            open_and_bind_ipv6(port);
+            return;
+        } catch (...) {
+            close_if_open();
+        }
+
+        open_and_bind_ipv4(port);
+    }
+
+    void open_and_bind_ipv6(uint16_t port) {
         fd_ = ::socket(AF_INET6, SOCK_DGRAM, 0);
         if (fd_ < 0) {
             throw_system_error("socket");
@@ -174,6 +185,22 @@ class UdpSocket {
             set_reuse_addr();
             set_dual_stack();
             bind_any(port);
+            set_non_blocking();
+        } catch (...) {
+            close_if_open();
+            throw;
+        }
+    }
+
+    void open_and_bind_ipv4(uint16_t port) {
+        fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (fd_ < 0) {
+            throw_system_error("socket");
+        }
+
+        try {
+            set_reuse_addr();
+            bind_any_ipv4(port);
             set_non_blocking();
         } catch (...) {
             close_if_open();
@@ -201,6 +228,18 @@ class UdpSocket {
         addr.sin6_family = AF_INET6;
         addr.sin6_port = htons(port);
         addr.sin6_addr = in6addr_any;
+
+        if (::bind(fd_, reinterpret_cast<const sockaddr*>(&addr),
+                   sizeof(addr)) < 0) {
+            throw_system_error("bind");
+        }
+    }
+
+    void bind_any_ipv4(uint16_t port) {
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
         if (::bind(fd_, reinterpret_cast<const sockaddr*>(&addr),
                    sizeof(addr)) < 0) {

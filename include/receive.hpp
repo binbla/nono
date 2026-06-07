@@ -126,7 +126,8 @@ class Receiver {
 
     // 消费 response。
     // 成功时返回 ConsumedResponse 并带出 peer；通常随后由 core 轮转 keypair。
-    ReceiveResult consume_response(NoiseProtocol& protocol, PeerManager& peers,
+    ReceiveResult consume_response(UdpSocket& socket, NoiseProtocol& protocol,
+                                   PeerManager& peers,
                                    IndexTable& index_table,
                                    HandshakeResponse& msg, const Endpoint& src);
     // 识别 CookieReply。

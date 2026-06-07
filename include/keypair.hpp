@@ -20,6 +20,22 @@ class Keypair {
    public:
     Keypair() = default;
 
+    Keypair(KeypairIndex local_index, Peer* owner, bool init = true)
+        : local_index(local_index),
+          owner(owner),
+          created_at(Timestamp::now()),
+          last_used_at(created_at),
+          i_am_the_initiator(init) {}
+
+    Keypair(KeypairIndex local_index, KeypairIndex remote_index, Peer* owner,
+            bool init = false)
+        : local_index(local_index),
+          remote_index(remote_index),
+          owner(owner),
+          created_at(Timestamp::now()),
+          last_used_at(created_at),
+          i_am_the_initiator(init) {}
+
     ~Keypair() {
         crypto::secure_zero(sending_);
         crypto::secure_zero(receiving_);
@@ -36,6 +52,7 @@ class Keypair {
     // 所属peer
     Peer* owner = nullptr;
     // 状态和计数器
+    // 这两个也是交给send和receive用的
     Timestamp created_at;    // keypair 创建时间，单位 ns
     Timestamp last_used_at;  // keypair 最后一次使用时间，单位 ns
 
@@ -76,19 +93,16 @@ class Keypair {
         receiving_counter.store(0, std::memory_order_relaxed);
         replay_.reset();
 
-        // last_mac1.fill(0);
-        // last_cookie.fill(0);
-
         i_am_the_initiator = false;
         is_activated = false;
     }
 
     // 判断可用性函数
-    // 两个，一个是判断是否可以发送（是否有可用的keypair），一个是判断是否可以接收（握手状态和keypair状态）
-    bool is_sendable() const {
-        // keypair的有效性有两个判断标准：
-        // 1. 时间
-        // 2. package上限
+    // 给sender和receiver用，判断这个keypair是否还有效，是否可以继续使用。
+    bool is_valid() const {
+        /*
+        判断这个keypair是否有效可用，主要是根据创建时间和使用计数来判断是否过期或者过度使用。
+         */
         if (!is_activated) {
             return false;
         }
@@ -102,31 +116,6 @@ class Keypair {
 
         bool is_overused = sending_counter.load(std::memory_order_relaxed) >
                            REKEY_AFTER_MESSAGES;
-
-        if (is_overused) {
-            return false;
-        }
-        return true;
-    }
-
-    bool is_receivable() const {
-        // 接收的有效性判断标准：
-        // 1. 握手状态必须是完成的
-        // 2. keypair必须激活且未过期
-
-        if (!is_activated) {
-            return false;
-        }
-
-        Timestamp now = Timestamp::now();
-        bool is_outdated = created_at.diff_seconds(now) > REJECT_AFTER_TIME;
-
-        if (is_outdated) {
-            return false;
-        }
-
-        bool is_overused = receiving_counter.load(std::memory_order_relaxed) >
-                           REJECT_AFTER_MESSAGES;
 
         if (is_overused) {
             return false;

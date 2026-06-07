@@ -3,8 +3,12 @@
 #include <cstring>
 
 #include "crypto.hpp"
+#include "logger.hpp"
 #include "messages.hpp"
+#include "send.hpp"
 #include "types.hpp"
+
+#include <sstream>
 
 namespace {
 
@@ -86,6 +90,9 @@ ReceiveResult Receiver::handle_packet(
 
     switch (*type) {
         case MessageType::HandshakeInitiation: {
+            if (config_.load_monitor != nullptr) {
+                config_.load_monitor->observe_handshake();
+            }
             HandshakeInitiation msg{};
             if (!parse_initiation(packet, msg)) {
                 return result(ReceiveAction::Drop, ReceiveError::ShortPacket,
@@ -94,12 +101,16 @@ ReceiveResult Receiver::handle_packet(
             return consume_initiation(socket, protocol, peers, msg, src);
         }
         case MessageType::HandshakeResponse: {
+            if (config_.load_monitor != nullptr) {
+                config_.load_monitor->observe_handshake();
+            }
             HandshakeResponse msg{};
             if (!parse_response(packet, msg)) {
                 return result(ReceiveAction::Drop, ReceiveError::ShortPacket,
                               src);
             }
-            return consume_response(protocol, peers, index_table, msg, src);
+            return consume_response(socket, protocol, peers, index_table, msg,
+                                    src);
         }
         case MessageType::CookieReply: {
             CookieReply msg{};
@@ -129,19 +140,41 @@ ReceiveResult Receiver::consume_initiation(UdpSocket& socket,
                                            PeerManager& peers,
                                            HandshakeInitiation& msg,
                                            const Endpoint& src) {
-    if (!verify_mac1(msg, protocol.precomputed_mac1_hash_self())) {
+    const KeypairIndex sender_index = wg::wire::le_to_host32(msg.sender_index);
+    const bool mac1_ok = verify_mac1(msg, protocol.precomputed_mac1_hash_self());
+    const bool mac2_required = needs_mac2_validation();
+    const bool mac2_ok =
+        !mac2_required || verify_mac2(msg, src, protocol.secret_for_cookie());
+
+    std::ostringstream log;
+    log << "RX INIT size=" << sizeof(HandshakeInitiation)
+        << " sender_index=" << sender_index
+        << " mac1=" << Logger::hex(msg.mac1)
+        << " mac1_ok=" << (mac1_ok ? "yes" : "no")
+        << " mac2=" << Logger::hex(msg.mac2)
+        << " mac2_required=" << (mac2_required ? "yes" : "no")
+        << " mac2_ok=" << (mac2_ok ? "yes" : "no");
+    Logger::default_logger().debug(log.str());
+
+    if (!mac1_ok) {
+        Logger::default_logger().warn("RX INIT drop: invalid mac1");
         return result(ReceiveAction::Drop, ReceiveError::InvalidMac1, src);
     }
 
-    if (needs_mac2_validation() &&
-        !verify_mac2(msg, src, protocol.secret_for_cookie())) {
-        return result(ReceiveAction::Drop, ReceiveError::InvalidMac2, src);
+    if (!mac2_ok) {
+        Sender sender(protocol.local_public());
+        SendResult sent = sender.send_cookie_reply(
+            socket, protocol, sender_index, msg.mac1, src);
+        return result(
+            sent.ok ? ReceiveAction::SentCookieReply : ReceiveAction::Drop,
+            sent.ok ? ReceiveError::None : ReceiveError::SocketFailed, src);
     }
     // 反序列化
-    msg.sender_index = wg::wire::le_to_host32(msg.sender_index);
+    msg.sender_index = sender_index;
     // 消费消息，找到对应的 peer。失败通常是因为未知的远程静态公钥。
     Peer* peer = protocol.consume_initiation(msg, peers);
     if (peer == nullptr) {
+        Logger::default_logger().warn("RX INIT drop: unknown peer or handshake rejected");
         return result(ReceiveAction::Drop, ReceiveError::UnknownPeer, src);
     }
 
@@ -152,24 +185,48 @@ ReceiveResult Receiver::consume_initiation(UdpSocket& socket,
     return out;
 }
 
-ReceiveResult Receiver::consume_response(NoiseProtocol& protocol,
-                                         PeerManager& peers,
-                                         IndexTable& index_table,
-                                         HandshakeResponse& msg,
-                                         const Endpoint& src) {
-    if (!verify_mac1(msg, protocol.precomputed_mac1_hash_self())) {
+ReceiveResult Receiver::consume_response(
+    UdpSocket& socket, NoiseProtocol& protocol, PeerManager& peers,
+    IndexTable& index_table, HandshakeResponse& msg, const Endpoint& src) {
+    const KeypairIndex sender_index = wg::wire::le_to_host32(msg.sender_index);
+    const KeypairIndex receiver_index =
+        wg::wire::le_to_host32(msg.receiver_index);
+    const bool mac1_ok = verify_mac1(msg, protocol.precomputed_mac1_hash_self());
+    const bool mac2_required = needs_mac2_validation();
+    const bool mac2_ok =
+        !mac2_required || verify_mac2(msg, src, protocol.secret_for_cookie());
+
+    std::ostringstream log;
+    log << "RX RESPONSE size=" << sizeof(HandshakeResponse)
+        << " sender_index=" << sender_index
+        << " receiver_index=" << receiver_index
+        << " mac1=" << Logger::hex(msg.mac1)
+        << " mac1_ok=" << (mac1_ok ? "yes" : "no")
+        << " mac2=" << Logger::hex(msg.mac2)
+        << " mac2_required=" << (mac2_required ? "yes" : "no")
+        << " mac2_ok=" << (mac2_ok ? "yes" : "no");
+    Logger::default_logger().debug(log.str());
+
+    if (!mac1_ok) {
+        Logger::default_logger().warn("RX RESPONSE drop: invalid mac1");
         return result(ReceiveAction::Drop, ReceiveError::InvalidMac1, src);
     }
-    if (needs_mac2_validation() &&
-        !verify_mac2(msg, src, protocol.secret_for_cookie())) {
-        return result(ReceiveAction::Drop, ReceiveError::InvalidMac2, src);
+    if (!mac2_ok) {
+        Sender sender(protocol.local_public());
+        SendResult sent = sender.send_cookie_reply(
+            socket, protocol, sender_index, msg.mac1, src);
+        return result(
+            sent.ok ? ReceiveAction::SentCookieReply : ReceiveAction::Drop,
+            sent.ok ? ReceiveError::None : ReceiveError::SocketFailed, src);
     }
     // 反序列化
-    msg.sender_index = wg::wire::le_to_host32(msg.sender_index);
-    msg.receiver_index = wg::wire::le_to_host32(msg.receiver_index);
+    msg.sender_index = sender_index;
+    msg.receiver_index = receiver_index;
 
     Peer* peer = protocol.consume_response(msg, peers, index_table);
     if (peer == nullptr) {
+        Logger::default_logger().warn(
+            "RX RESPONSE drop: unknown index or handshake rejected");
         return result(ReceiveAction::Drop, ReceiveError::UnknownIndex, src);
     }
 
@@ -184,11 +241,20 @@ ReceiveResult Receiver::consume_cookie_reply(CookieReply& msg,
                                              IndexTable& index_table) {
     // 反序列化
     msg.receiver_index = wg::wire::le_to_host32(msg.receiver_index);
+    {
+        std::ostringstream log;
+        log << "RX COOKIE-REPLY size=" << sizeof(CookieReply)
+            << " receiver_index=" << msg.receiver_index
+            << " nonce=" << Logger::hex(msg.nonce)
+            << " encrypted_cookie=" << Logger::hex(msg.encrypted_cookie);
+        Logger::default_logger().debug(log.str());
+    }
     // 找到对应的
     // keypair，通常是最近一次发起握手时用的那个。失败可能是因为过期的 cookie
     // reply。
     Keypair* keypair = index_table.find(msg.receiver_index);
     if (keypair == nullptr) {
+        Logger::default_logger().warn("RX COOKIE-REPLY drop: unknown receiver index");
         return result(ReceiveAction::Drop, ReceiveError::UnknownIndex, src);
     }
     Handshake& hs = keypair->owner->handshake();
@@ -203,12 +269,24 @@ ReceiveResult Receiver::consume_cookie_reply(CookieReply& msg,
     Cookie cookie{};
 
     // decrypt
-    crypto::xaead_decrypt(precomputed_mac2_hash, nonce, expected_mac1,
-                          msg.encrypted_cookie, cookie);
+    if (!crypto::xaead_decrypt(precomputed_mac2_hash, nonce, expected_mac1,
+                               msg.encrypted_cookie, cookie)) {
+        Logger::default_logger().warn("RX COOKIE-REPLY drop: decrypt failed");
+        return result(ReceiveAction::Drop, ReceiveError::InvalidMac2, src);
+    }
     // 保存这个cookie到keypair里，供下一次发起握手时使用
     hs.last_cookie = cookie;
+    {
+        std::ostringstream log;
+        log << "RX COOKIE-REPLY cookie=" << Logger::hex(cookie) << " saved";
+        Logger::default_logger().debug(log.str());
+    }
 
-    return result(ReceiveAction::ConsumedCookieReply, ReceiveError::None, src);
+    ReceiveResult out =
+        result(ReceiveAction::ConsumedCookieReply, ReceiveError::None, src);
+    out.peer = keypair->owner;
+    out.keypair = keypair;
+    return out;
 }
 ReceiveResult Receiver::consume_transport(NoiseProtocol& protocol,
                                           IndexTable& index_table,
@@ -224,19 +302,39 @@ ReceiveResult Receiver::consume_transport(NoiseProtocol& protocol,
         wg::wire::le_to_host32(msg.header.receiver_index);
     msg.header.counter = wg::wire::le_to_host64(msg.header.counter);
 
+    {
+        std::ostringstream log;
+        log << "RX TRANSPORT size="
+            << sizeof(TransportDataHeader) + ciphertext_size
+            << " receiver_index=" << msg.header.receiver_index
+            << " counter=" << msg.header.counter
+            << " ciphertext_size=" << ciphertext_size;
+        Logger::default_logger().debug(log.str());
+    }
+
     Keypair* keypair = index_table.find(msg.header.receiver_index);
     if (keypair == nullptr) {
+        Logger::default_logger().warn("RX TRANSPORT drop: unknown receiver index");
         return result(ReceiveAction::Drop, ReceiveError::UnknownIndex, src);
     }
 
     const size_t plaintext_size = ciphertext_size - TAG_SIZE;
     if (plaintext_out.size() < plaintext_size) {
+        Logger::default_logger().warn("RX TRANSPORT drop: output buffer too small");
         return result(ReceiveAction::Drop, ReceiveError::OutputTooSmall, src);
     }
 
     std::span<uint8_t> plaintext(plaintext_out.data(), plaintext_size);
     if (!protocol.consume_datatrans(index_table, msg, plaintext)) {
+        Logger::default_logger().warn("RX TRANSPORT drop: decrypt/replay failed");
         return result(ReceiveAction::Drop, ReceiveError::CryptoFailed, src);
+    }
+
+    {
+        std::ostringstream log;
+        log << "RX TRANSPORT plaintext_size=" << plaintext_size
+            << " decrypted=yes";
+        Logger::default_logger().debug(log.str());
     }
 
     ReceiveResult out =
@@ -247,9 +345,10 @@ ReceiveResult Receiver::consume_transport(NoiseProtocol& protocol,
     return out;
 }
 
+// 解析消息
 bool Receiver::parse_initiation(std::span<const uint8_t> packet,
                                 HandshakeInitiation& out) {
-    if (packet.size() < sizeof(HandshakeInitiation)) {
+    if (packet.size() != sizeof(HandshakeInitiation)) {
         return false;
     }
     std::memcpy(&out, packet.data(), sizeof(HandshakeInitiation));
@@ -257,7 +356,7 @@ bool Receiver::parse_initiation(std::span<const uint8_t> packet,
 }
 bool Receiver::parse_response(std::span<const uint8_t> packet,
                               HandshakeResponse& out) {
-    if (packet.size() < sizeof(HandshakeResponse)) {
+    if (packet.size() != sizeof(HandshakeResponse)) {
         return false;
     }
     std::memcpy(&out, packet.data(), sizeof(HandshakeResponse));
@@ -265,7 +364,7 @@ bool Receiver::parse_response(std::span<const uint8_t> packet,
 }
 bool Receiver::parse_cookie_reply(std::span<const uint8_t> packet,
                                   CookieReply& out) {
-    if (packet.size() < sizeof(CookieReply)) {
+    if (packet.size() != sizeof(CookieReply)) {
         return false;
     }
     std::memcpy(&out, packet.data(), sizeof(CookieReply));
@@ -288,12 +387,13 @@ bool Receiver::parse_transport(std::span<const uint8_t> packet,
                 packet.data() + sizeof(TransportDataHeader), ciphertext_size);
     return out.header.message_type == MessageType::TransportData;
 }
+
+// 返回MessageType
 std::optional<MessageType> Receiver::peek_message_type(
     std::span<const uint8_t> packet) {
     if (packet.empty()) {
         return std::nullopt;
     }
-
     switch (packet[0]) {
         case static_cast<uint8_t>(MessageType::HandshakeInitiation):
             return MessageType::HandshakeInitiation;

@@ -19,7 +19,7 @@ namespace wg {
 class NoiseProtocol {
     // NoiseProtocol 负责 Noise 协议相关的所有状态和操作，包括：
     // - 本地长期密钥对（身份）
-    // - 预计算的 base_chaining_key 和 base_hash
+    // - 预计算的 base_chaining_key 和 base_hash 等
     // - 握手消息的创建和消费逻辑
    public:
     NoiseProtocol() = default;

@@ -45,14 +45,15 @@ class Peer {
         : remote_static_(config.remote_static),
           preshared_key_(config.preshared_key),
           endpoint_(config.endpoint) {
+        // 预计算的mac1_hash和mac2_hash，等价于HASH("mac1----" ||
+        // remote_static)和HASH("cookie--" || remote_static)
         std::span<const uint8_t> mac1label(
             reinterpret_cast<const uint8_t*>(kMac1Label),
             sizeof(kMac1Label) - 1);
         std::span<const uint8_t> cookie_label_span(
             reinterpret_cast<const uint8_t*>(kCookieLabel),
             sizeof(kCookieLabel) - 1);
-        // 预计算的mac1_hash和mac2_hash，等价于HASH("mac1----" ||
-        // remote_static)和HASH("cookie--" || remote_static)
+
         crypto::hash_concat(mac1label, remote_static_, precomputed_mac1_hash_);
         crypto::hash_concat(cookie_label_span, remote_static_,
                             precomputed_mac2_hash_);

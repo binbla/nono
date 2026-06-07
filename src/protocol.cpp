@@ -38,15 +38,11 @@ bool reserve_sending_counter(Keypair& keypair, uint64_t& counter) {
 bool NoiseProtocol::initialize(const PrivateKey& local_private,
                                const PublicKey& local_public) {
     // 初始化本地长期密钥对和预计算的 base_chaining_key / base_hash
-    if (wg::crypto::is_all_zero(local_private) ||
-        wg::crypto::is_all_zero(local_public)) {
-        return false;
-    }
     local_private_ = local_private;
     local_public_ = local_public;
 
     if (!wg::noise::initialize_base(base_chaining_key_, base_hash_,
-                                    base_hash_self_)) {
+                                    base_hash_self_, local_public_)) {
         return false;
     }
     // 用作生成cookie的预计算材料，等价于 HASH(kCookieLabel || S^{pub})
@@ -87,14 +83,10 @@ void NoiseProtocol::clear() {
 NoiseProtocol::~NoiseProtocol() { clear(); }
 
 // ================================================================
-// NoiseProtocol::handshake
+// NoiseProtocol::handshake initiater
 // ================================================================
-// Keypair 是新分配的。在此之前一定要先处理掉原来的keypair
 bool NoiseProtocol::create_initiation(Peer& peer, Keypair& keypair,
                                       HandshakeInitiation& msg) {
-    if (!initialized_) {
-        return false;
-    }
     // 初始化消息头
     msg.message_type = MessageType::HandshakeInitiation;
     msg.sender_index = keypair.local_index;
@@ -103,149 +95,111 @@ bool NoiseProtocol::create_initiation(Peer& peer, Keypair& keypair,
     msg.timestamp_encrypted.fill(0);
     msg.mac1.fill(0);  // 这个交给上层去算
     msg.mac2.fill(0);
-
-    // keipair的初始化应该在外面做
-
-    // 1-3
+    // 临时变量
     Handshake& hs = peer.handshake();
-    hs.clear_runtime();
-    // 运行时的ck和h (临时变量最后才保存，msg填写内容则立马更新)
-    PrivateKey ephemeral_private{};
     ChainingKey chaining_key = base_chaining_key_;
-    Hash hash = peer.base_hash_peer();
-
-    // 4
-    // 这里直接把hs.ephemeral_private填好
-    if (!crypto::generate_ephemeral_keypair(ephemeral_private,        // Epriv_i
-                                            msg.ephemeral_public)) {  // Epub_i
-        return false;
-    }
-
-    // 5-7（mix 自己的临时公钥）
-    noise::mix_ephemeral(msg.ephemeral_public, chaining_key, hash);
-
+    Hash hash = peer.base_hash_peer();  // 对方的
+    PrivateKey ephemeral_private{};
     SymmetricKey key{};
-    // 8 es
-    if (!noise::mix_dh(chaining_key, key,
-                       ephemeral_private,        // Epriv_i
-                       peer.remote_static())) {  // Spub_r
-        crypto::secure_zero(key);
-        return false;
-    }
 
-    // 9-10
-    if (!noise::encrypt_and_hash(msg.static_encrypted,
-                                 local_public_,  // Spub_i
-                                 key, hash)) {
-        crypto::secure_zero(key);
-        return false;
-    }
-
-    // 11 ss
-    // 自己的Epriv和对方的Epub，得到的key会被后续的timestamp加密覆盖掉，不直接用于AEAD）
-    if (!noise::mix_precomputed_dh(chaining_key, key,
-                                   peer.precomputed_static_static())) {
-        crypto::secure_zero(key);
-        return false;
-    }
-
-    // 12-13
-    Timestamp timestamp = keypair.created_at;
-
-    if (!noise::encrypt_and_hash(msg.timestamp_encrypted, timestamp.bytes(),
-                                 key, hash)) {
-        crypto::secure_zero(key);
-        return false;
-    }
-
+    // handshake 清空
+    hs.clear_runtime();
+    // generate ephemeral keypair
+    crypto::generate_ephemeral_keypair(ephemeral_private, msg.ephemeral_public);
+    // e
+    noise::mix_ephemeral(msg.ephemeral_public, chaining_key, hash);
+    // es
+    noise::mix_dh(chaining_key, key, ephemeral_private, peer.remote_static());
+    // s
+    noise::encrypt_and_hash(msg.static_encrypted, local_public_, key, hash);
+    // ss
+    noise::mix_precomputed_dh(chaining_key, key,
+                              peer.precomputed_static_static());
+    // timestamp
+    noise::encrypt_and_hash(msg.timestamp_encrypted, keypair.created_at.bytes(),
+                            key, hash);
+    // 后处理
+    crypto::secure_zero(key);
     // 保存握手状态
     hs.ephemeral_private = ephemeral_private;
     hs.local_index = keypair.local_index;
     hs.state = HandshakeState::CreatedInitiation;
-    hs.latest_timestamp = timestamp;
-    // mac1和cookie都在上层计算，协议层不关心
-    crypto::secure_zero(key);
+    hs.latest_timestamp = keypair.created_at;
+
     return true;
 }
 
 Peer* NoiseProtocol::consume_initiation(const HandshakeInitiation& msg,
                                         PeerManager& peers) {
-    if (!initialized_) return nullptr;
-    // 正常从消息中解析出这些字段
+    /*
+    消费握手消息
+    1. 首先是解析消息，拿到对应的信息。证明消息的正确性
+    2. handshake必须是清空的。
+    3. 消费完后更新状态
+     */
+    if (!initialized_) {
+        return nullptr;
+    }
+
+    // 临时变量
+    ChainingKey chaining_key = base_chaining_key_;
+    Hash hash = base_hash_self_;  // comsume的时候用自己的
     PublicKey ephemeral_public{};
     SymmetricKey key{};
     PublicKey remote_static{};
     Timestamp timestamp{};
 
-    // 初始化
-    ChainingKey chaining_key = base_chaining_key_;
-    Hash hash = base_hash_self_;
-
     // 1. 获取 msg.ephemeral
     ephemeral_public = msg.ephemeral_public;
 
-    // mix ephemeral
+    // e
     noise::mix_ephemeral(ephemeral_public, chaining_key, hash);
-
-    // 2. es = DH(local_static_private, msg.ephemeral)
-    if (!noise::mix_dh(chaining_key, key, local_private_, ephemeral_public)) {
-        crypto::secure_zero(key);
-        return nullptr;
-    }
-
-    // 3. 解密静态公钥 msg.static
+    // es
+    noise::mix_dh(chaining_key, key, local_private_, ephemeral_public);
+    // s (不可信任，来自网络，验证后才能用)
     if (!noise::decrypt_and_hash(remote_static, msg.static_encrypted, key,
                                  hash)) {
         crypto::secure_zero(key);
         return nullptr;
     }
-
-    // 4. 查找 peer
+    // 找到peer
     Peer* peer = peers.find_by_public_key(remote_static);
     if (!peer) {
         crypto::secure_zero(key);
         return nullptr;
     }
-
-    Handshake& hs = peer->handshake();
-
-    // 5. ss = mix_precomputed_dh(peer.precomputed_static_static)
-    if (!noise::mix_precomputed_dh(chaining_key, key,
-                                   peer->precomputed_static_static())) {
-        crypto::secure_zero(key);
-        return nullptr;
-    }
-
-    // 6. 解密 timestamp 并更新 replay/flood 防护
+    //
+    noise::mix_precomputed_dh(chaining_key, key,
+                              peer->precomputed_static_static());
+    // timestamp（不可信任，来自网络，验证后才能用）
     if (!noise::decrypt_and_hash(timestamp.bytes(), msg.timestamp_encrypted,
                                  key, hash)) {
         crypto::secure_zero(key);
         return nullptr;
     }
 
+    Handshake& hs = peer->handshake();
     Timestamp now_ns = Timestamp::now();
 
     // replay / flood 检查
-    // 一个必须递增
-    // 一个必须足够久（比如5秒）才能接受同一peer的下一次握手请求
-    // 反正初始化都是0,第一次握手只要timestamp>0就能过，后续握手必须满足上面两个条件才能过
     bool replay_attack = (timestamp <= hs.latest_timestamp);
     bool flood_attack =
         (hs.last_initiation_consumption_ns + kInitiationMinInterval > now_ns);
-
     if (replay_attack || flood_attack) {
         crypto::secure_zero(key);
         return nullptr;
     }
+    // 后处理
+    crypto::secure_zero(key);
 
-    // 7. 更新 peer.handshake 状态
+    // 更新握手状态
+    hs.clear_runtime();  // 清空旧的握手状态
     hs.remote_ephemeral = ephemeral_public;
     hs.latest_timestamp = timestamp;  // init方的创建时间
     hs.remote_index = msg.sender_index;
     hs.last_initiation_consumption_ns = now_ns;  // 消费 initiation 的时间
     hs.state = HandshakeState::ConsumedInitiation;
 
-    crypto::secure_zero(key);
     return peer;
 }
 // ================================================================
@@ -253,10 +207,28 @@ Peer* NoiseProtocol::consume_initiation(const HandshakeInitiation& msg,
 // ================================================================
 bool NoiseProtocol::create_response(Peer& peer, Keypair& keypair,
                                     HandshakeResponse& msg) {
-    if (!initialized_) {
+    /*
+    创建握手响应消息
+    1. 确认状态：handshake必须是ConsumedInitiation状态
+    2. keypair是新分配的，这里不管。
+    3. 创建响应消息，更新握手状态
+     */
+
+    // 临时变量
+    Handshake& hs = peer.handshake();
+    ChainingKey chaining_key = base_chaining_key_;
+    Hash hash = peer.base_hash_peer();  // create response的时候用对方的
+    PrivateKey ephemeral_private{};
+    SymmetricKey key{};
+    SymmetricKey sending{};
+    SymmetricKey receiving{};
+    // 检查状态
+    if (!initialized_ ||
+        (hs.state != HandshakeState::ConsumedInitiation &&
+         hs.state != HandshakeState::CreatedResponse) ||
+        hs.remote_index == 0 || crypto::is_all_zero(hs.remote_ephemeral)) {
         return false;
     }
-    Handshake& hs = peer.handshake();
     // 初始化消息头
     msg.message_type = MessageType::HandshakeResponse;
     msg.sender_index = keypair.local_index;
@@ -266,57 +238,33 @@ bool NoiseProtocol::create_response(Peer& peer, Keypair& keypair,
     msg.mac1.fill(0);
     msg.mac2.fill(0);
 
-    PrivateKey ephemeral_private{};
-    ChainingKey chaining_key = base_chaining_key_;
-    Hash hash = peer.base_hash_peer();
-
-    // 1. 生成 ephemeral keypair
-    if (!crypto::generate_ephemeral_keypair(ephemeral_private,        // Epriv_r
-                                            msg.ephemeral_public)) {  // Epub_r
-        return false;
-    }
-
-    // 2. mix_ephemeral
+    // gen ephemeral keypair
+    crypto::generate_ephemeral_keypair(ephemeral_private, msg.ephemeral_public);
+    // e
     noise::mix_ephemeral(msg.ephemeral_public, chaining_key, hash);
-
-    // 3. DH响应方的ephemeral和发起方的ephemeral ee
-    SymmetricKey key{};
-    if (!noise::mix_dh(chaining_key, key,
-                       ephemeral_private,       // Epriv_r
-                       hs.remote_ephemeral)) {  // Epub_i
-        crypto::secure_zero(key);
-        return false;
-    }  // 这里输出的 k 不直接用于 AEAD，随后会被 se/psk 步骤覆盖。
-
-    // 4. mix_dh响应方的ephemeral和发起方的静态 se
-    if (!noise::mix_dh(chaining_key, key,
-                       ephemeral_private,        // Epriv_r
-                       peer.remote_static())) {  // Spub_i
-        crypto::secure_zero(key);
-        return false;
-    }
-
-    // 5. mix_psk 如果有预共享密钥的话 这里得到的key是要使用的
+    // ee
+    noise::mix_dh(chaining_key, key, ephemeral_private, hs.remote_ephemeral);
+    // es
+    noise::mix_dh(chaining_key, key, ephemeral_private, peer.remote_static());
+    // psk
     noise::mix_psk(chaining_key, hash, key, peer.preshared_key());
-
-    // 6. encrypt_and_hash 空消息
-    if (!noise::encrypt_and_hash(msg.empty_encrypted,
-                                 /*plaintext=*/{}, key, hash)) {
-        crypto::secure_zero(key);
-        return false;
-    }
+    // encrypt_and_hash 空消息
+    noise::encrypt_and_hash(msg.empty_encrypted,
+                            /*plaintext=*/{}, key, hash);
+    // 派生对称密钥
+    noise::derive_transport_keys(chaining_key, receiving, sending);
+    // 后处理
     crypto::secure_zero(key);
 
-    SymmetricKey sending{};
-    SymmetricKey receiving{};
-    noise::derive_transport_keys(chaining_key, receiving, sending);
     keypair.remote_index = hs.remote_index;
     keypair.set_sending(sending);
     keypair.set_receiving(receiving);
+    // keypair.is_activated = true; // 要收到第一条消息才激活
     crypto::secure_zero(sending);
     crypto::secure_zero(receiving);
     crypto::secure_zero(chaining_key);
 
+    // 更新握手状态
     hs.ephemeral_private = ephemeral_private;
     hs.local_index = keypair.local_index;
     hs.state = HandshakeState::CreatedResponse;
@@ -326,55 +274,74 @@ bool NoiseProtocol::create_response(Peer& peer, Keypair& keypair,
 Peer* NoiseProtocol::consume_response(const HandshakeResponse& msg,
                                       PeerManager& peers,
                                       IndexTable& index_table) {
-    if (!initialized_) return nullptr;
+    /*
+    消费握手响应消息
+    1. 首先是解析消息，拿到对应的信息。证明消息的正确
+    2. 判断keypair存在且未激活
+    3. handshake状态正确且index对得上
+    4. 消费完后更新状态
+    */
+    if (!initialized_) {
+        return nullptr;
+    }
+    // 临时变量
+    ChainingKey chaining_key;
+    Hash hash;
+    KeypairIndex remote_index;
+    PublicKey remote_ephemeral;
+    Peer* peer;
+    SymmetricKey key{};
+    std::array<uint8_t, 0> empty{};
+    SymmetricKey sending{};
+    SymmetricKey receiving{};
+
     // 1. 找到对应的keypair和对方生成的ephemeral key
     Keypair* keypair = index_table.find(msg.receiver_index);
     if (!keypair) {
         return nullptr;
     }
-    // 这里要不要判断一下keypair的状态？
-    // keypair自创建的时候就注册一个定时事件，如果keypair过期了这个定时事件就会把它删掉，就会找不到
-    Peer* peer = keypair->owner;
+    // 检查keypair的正确性
+    if (keypair->is_activated) {
+        return nullptr;
+    }
+    // 检查handshake的正确性
+    peer = keypair->owner;
     Handshake& hs = peer->handshake();
 
-    KeypairIndex remote_index = msg.sender_index;
-    PublicKey remote_ephemeral = msg.ephemeral_public;
+    if (hs.state != HandshakeState::CreatedInitiation ||
+        hs.local_index != msg.receiver_index) {
+        return nullptr;
+    }
 
-    ChainingKey chaining_key = base_chaining_key_;
-    Hash hash = peer->base_hash_peer();
+    // 解析消息内容
+    remote_index = msg.sender_index;
+    remote_ephemeral = msg.ephemeral_public;
+    chaining_key = base_chaining_key_;
+    hash = base_hash_self_;  // comsume 的时候用自己的
 
-    // 2. mix_ephemeral
+    // e
     noise::mix_ephemeral(msg.ephemeral_public, chaining_key, hash);
-    // 3. mix_dh ee
-    SymmetricKey key{};
-    if (!noise::mix_dh(chaining_key, key,
-                       hs.ephemeral_private,  // Epriv_i
-                       remote_ephemeral)) {   // Epub_r
-        crypto::secure_zero(key);
-        return nullptr;
-    }
-    // 4. mix_dh se
-    if (!noise::mix_dh(chaining_key, key, local_private_,  // Spriv_i
-                       remote_ephemeral)) {                // Epub_r
-        crypto::secure_zero(key);
-        return nullptr;
-    }
-    // 5. mix_psk
+    // ee
+    noise::mix_dh(chaining_key, key, hs.ephemeral_private, remote_ephemeral);
+    // es
+    noise::mix_dh(chaining_key, key, local_private_,  // Spriv_i
+                  remote_ephemeral);
+    // psk
     noise::mix_psk(chaining_key, hash, key, peer->preshared_key());
-    // 6. 验证aead的tag
-    std::array<uint8_t, 0> empty{};
+    // decrypt_and_hash 空消息，验证消息的正确性(数据来自网络，不可信任)
     if (!noise::decrypt_and_hash(empty, msg.empty_encrypted, key, hash)) {
         crypto::secure_zero(key);
         return nullptr;
     }
+    // 派生对称密钥
+    noise::derive_transport_keys(chaining_key, sending, receiving);
+    // 后处理
     crypto::secure_zero(key);
 
-    SymmetricKey sending{};
-    SymmetricKey receiving{};
-    noise::derive_transport_keys(chaining_key, sending, receiving);
     keypair->remote_index = remote_index;
     keypair->set_sending(sending);
     keypair->set_receiving(receiving);
+    keypair->is_activated = true;  // 握手完成，直接激活，允许发送和接收
     crypto::secure_zero(sending);
     crypto::secure_zero(receiving);
     crypto::secure_zero(chaining_key);
@@ -389,63 +356,67 @@ Peer* NoiseProtocol::consume_response(const HandshakeResponse& msg,
 // ================================================================
 // NoiseProtocol::data transport
 // ================================================================
-
+// 上层自己要保证传入的参数合法且足够
 bool NoiseProtocol::create_datatrans(Keypair& keypair,
                                      std::span<const uint8_t> data,
                                      TransportData& msg) {
-    if (!keypair.is_activated) {
-        return false;
-    }
-    if (data.size() > PAYLOAD_MAX_SIZE) {
-        return false;
-    }
-
     uint64_t counter = 0;
     if (!reserve_sending_counter(keypair, counter)) {
         return false;
     }
 
-    // 1. 初始化消息头
+    // 初始化消息头
     msg.header.message_type = MessageType::TransportData;
     msg.header.reserved[0] = 0;
     msg.header.reserved[1] = 0;
     msg.header.reserved[2] = 0;
     msg.header.receiver_index = keypair.remote_index;
     msg.header.counter = counter;
+    msg.encrypted_data.fill(0);
 
     Nonce nonce = nonce_from_counter(counter);
 
-    msg.encrypted_data.fill(0);
     const size_t ciphertext_size = data.size() + TAG_SIZE;
     std::span<uint8_t> ciphertext(msg.encrypted_data.data(), ciphertext_size);
-    if (!crypto::aead_encrypt(keypair.sending(), nonce,
-                              /*ad=*/std::span<const uint8_t>{}, data,
-                              ciphertext)) {
-        msg.encrypted_data.fill(0);
-        return false;
-    }
+    // 使用对称密钥加密数据(自信任上层传入的参数)
+    crypto::aead_encrypt(keypair.sending(), nonce,
+                         /*ad=*/std::span<const uint8_t>{}, data, ciphertext);
 
     keypair.last_used_at = Timestamp::now();
     return true;
 }
 
+// 作为协议底层，直接相信上层传入的参数合法且足够
 bool NoiseProtocol::consume_datatrans(IndexTable& index_table,
                                       const TransportData& msg,
                                       std::span<uint8_t> data) {
-    if (data.size() > PAYLOAD_MAX_SIZE) {
+    if (!initialized_) {
         return false;
     }
-
     Keypair* keypair = index_table.find(msg.header.receiver_index);
     if (keypair == nullptr) {
         return false;
+    }
+    // 已激活则跳过检查
+    if (keypair->is_activated) {
+        // 已激活，无需处理
+    } else if (keypair->i_am_the_initiator) {
+        // 发起方不应该处于未激活状态
+        return false;
+    } else {
+        // 响应方：需要收到第一条数据消息才能激活
+        const Handshake& hs = keypair->owner->handshake();
+        if (hs.state != HandshakeState::CreatedResponse ||
+            hs.local_index != msg.header.receiver_index) {
+            return false;
+        }
     }
 
     const size_t ciphertext_size = data.size() + TAG_SIZE;
     std::span<const uint8_t> ciphertext(msg.encrypted_data.data(),
                                         ciphertext_size);
     const Nonce nonce = nonce_from_counter(msg.header.counter);
-
+    // 使用对称密钥解密数据（数据来自网络，不可信任）
     if (!crypto::aead_decrypt(keypair->receiving(), nonce,
                               /*ad=*/std::span<const uint8_t>{}, ciphertext,
                               data)) {
@@ -457,11 +428,14 @@ bool NoiseProtocol::consume_datatrans(IndexTable& index_table,
         crypto::secure_zero(data);
         return false;
     }
+    keypair->is_activated = true;
 
-    keypair->last_used_at = Timestamp::now();
+    // keypair->last_used_at = Timestamp::now(); // 这个让send/receive自己更新
     return true;
 }
 
+// 定时轮转 secret_for_cookie
+// 注册给周期计时器就行
 void NoiseProtocol::rotate_secret_for_cookie() {
     Bytes32 next_secret{};
     if (!crypto::fill_random(next_secret)) {

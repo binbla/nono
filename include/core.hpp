@@ -1,15 +1,22 @@
 #ifndef CORE_HPP
 #define CORE_HPP
+#include <atomic>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <span>
+#include <thread>
 
 #include "endpoint.hpp"
 #include "index_table.hpp"
+#include "load_monitor.hpp"
+#include "logger.hpp"
 #include "peer.hpp"
 #include "peer_manager.hpp"
 #include "protocol.hpp"
 #include "receive.hpp"
 #include "send.hpp"
+#include "socket_c.hpp"
 #include "timer.hpp"
 #include "types.hpp"
 namespace wg {
@@ -27,6 +34,8 @@ namespace wg {
 */
 using PacketCallback =
     std::function<void(Peer& peer, std::span<const uint8_t> packet)>;
+using ReceiveEventCallback = std::function<void(const ReceiveResult& result)>;
+using WirePacketCallback = std::function<void(std::span<const uint8_t> packet)>;
 class Core {
    public:
     Core();
@@ -52,6 +61,8 @@ class Core {
 
     bool running() const;
 
+    const PublicKey& local_public() const;
+
     // ------------------------------------------------------------
     // Peer 管理
     // ------------------------------------------------------------
@@ -74,6 +85,14 @@ class Core {
     SendResult send_to_peer(const PublicKey& remote_static,
                             std::span<const uint8_t> packet);
 
+    SendResult begin_handshake(Peer& peer);
+
+    SendResult begin_handshake(const PublicKey& remote_static);
+
+    SendResult retry_handshake(Peer& peer);
+
+    SendResult retry_handshake(const PublicKey& remote_static);
+
     // ------------------------------------------------------------
     // 接收接口
     // ------------------------------------------------------------
@@ -82,7 +101,13 @@ class Core {
     ReceiveResult poll_once();
 
     // 如果你做 callback，则注册上层回调。
-    void set_packet_callback(auto cb) { (void)cb; }
+    void set_packet_callback(PacketCallback cb);
+
+    void set_receive_event_callback(ReceiveEventCallback cb);
+
+    void set_wire_packet_callback(WirePacketCallback cb);
+
+    void set_logger(Logger* logger);
 
     // ------------------------------------------------------------
     // 定时器 / 状态推进
@@ -91,6 +116,8 @@ class Core {
     void tick();
 
     void register_default_timers();
+
+    void set_force_cookie_reply(bool force);
 
     TimerManager& timers();
 
@@ -103,11 +130,28 @@ class Core {
     NoiseProtocol& protocol();
 
    private:
+    KeypairIndex allocate_index();
+    Keypair* install_next_keypair(Peer& peer, bool i_am_the_initiator);
+    SendResult initiate_handshake(Peer& peer);
+    SendResult resend_response(Peer& peer, Keypair& keypair);
+    void handle_receive_result(const ReceiveResult& result,
+                               std::span<const uint8_t> plaintext);
+    void run_loop();
+
     PeerManager peer_manager_;
     IndexTable index_table_;
     NoiseProtocol protocol_;
     TimerManager timers_;
-    bool running_ = false;
+    LoadMonitor load_monitor_;
+    std::unique_ptr<UdpSocket> socket_;
+    std::unique_ptr<Sender> sender_;
+    std::unique_ptr<Receiver> receiver_;
+    PacketCallback packet_callback_;
+    ReceiveEventCallback receive_event_callback_;
+    Logger* logger_ = &Logger::default_logger();
+    std::thread worker_;
+    mutable std::mutex mutex_;
+    std::atomic_bool running_{false};
 };
 }  // namespace wg
 #endif  // CORE_HPP

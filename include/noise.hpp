@@ -38,7 +38,7 @@ inline constexpr char kNoiseIdentifier[] =
 ///
 /// NoiseProtocol 可以在初始化时调用一次，并缓存输出。
 bool initialize_base(ChainingKey& base_chaining_key, Hash& base_hash,
-                     Hash& base_hash_self);
+                     Hash& base_hash_self, PublicKey local_public);
 
 // ============================================================================
 // Transcript hash

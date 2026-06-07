@@ -33,6 +33,7 @@ class IndexTable {
         return it == keypairs_.end() ? nullptr : it->second;
     }
 
+    // 检查是否包含指定 index。
     bool contains(KeypairIndex idx) const {
         std::lock_guard<std::mutex> lg(mutex_);
         return keypairs_.find(idx) != keypairs_.end();

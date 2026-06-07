@@ -1,8 +1,10 @@
 #include "send.hpp"
 
 #include <cstring>
+#include <sstream>
 
 #include "crypto.hpp"
+#include "logger.hpp"
 #include "utils.hpp"
 namespace {
 // 切割
@@ -66,7 +68,9 @@ SendResult Sender::send_initiation(UdpSocket& socket, NoiseProtocol& protocol,
     Handshake& hs = peer.handshake();
     HandshakeInitiation msg{};
     // 填充协议层面消息内容
-    protocol.create_initiation(peer, keypair, msg);
+    if (!protocol.create_initiation(peer, keypair, msg)) {
+        return {};
+    }
     // 序列化
     msg.sender_index = wg::wire::host_to_le32(msg.sender_index);
     // 填充 mac1 和 mac2
@@ -78,6 +82,15 @@ SendResult Sender::send_initiation(UdpSocket& socket, NoiseProtocol& protocol,
     hs.last_mac1 = msg.mac1;
 
     const std::span<const uint8_t> bytes = wire_bytes(msg);
+
+    std::ostringstream log;
+    log << "TX INIT size=" << bytes.size()
+        << " sender_index=" << keypair.local_index
+        << " mac1=" << Logger::hex(msg.mac1)
+        << " mac2=" << Logger::hex(msg.mac2)
+        << " cookie_used="
+        << (crypto::is_all_zero(hs.last_cookie) ? "no" : "yes");
+    Logger::default_logger().debug(log.str());
 
     if (packet_logger_) {
         packet_logger_(bytes);
@@ -94,7 +107,9 @@ SendResult Sender::send_response(UdpSocket& socket, NoiseProtocol& protocol,
     }
     HandshakeResponse msg{};
     // 填充消息
-    protocol.create_response(peer, keypair, msg);
+    if (!protocol.create_response(peer, keypair, msg)) {
+        return {};
+    }
     Handshake& hs = peer.handshake();
     // 序列化
     msg.sender_index = wg::wire::host_to_le32(keypair.local_index);
@@ -107,6 +122,16 @@ SendResult Sender::send_response(UdpSocket& socket, NoiseProtocol& protocol,
     hs.last_mac1 = msg.mac1;
 
     const std::span<const uint8_t> bytes = wire_bytes(msg);
+    std::ostringstream log;
+    log << "TX RESPONSE size=" << bytes.size()
+        << " sender_index=" << keypair.local_index
+        << " receiver_index=" << keypair.remote_index
+        << " mac1=" << Logger::hex(msg.mac1)
+        << " mac2=" << Logger::hex(msg.mac2)
+        << " cookie_used="
+        << (crypto::is_all_zero(hs.last_cookie) ? "no" : "yes");
+    Logger::default_logger().debug(log.str());
+
     if (packet_logger_) {
         packet_logger_(bytes);
     }
@@ -143,6 +168,15 @@ SendResult Sender::send_cookie_reply(UdpSocket& socket, NoiseProtocol& protocol,
     msg.receiver_index = wg::wire::host_to_le32(receiver_index);
 
     const std::span<const uint8_t> bytes = wire_bytes(msg);
+    std::ostringstream log;
+    log << "TX COOKIE-REPLY size=" << bytes.size()
+        << " receiver_index=" << receiver_index
+        << " nonce=" << Logger::hex(msg.nonce)
+        << " mac1_ad=" << Logger::hex(mac1)
+        << " cookie=" << Logger::hex(cookie)
+        << " encrypted_cookie=" << Logger::hex(msg.encrypted_cookie);
+    Logger::default_logger().debug(log.str());
+
     if (packet_logger_) {
         packet_logger_(bytes);
     }
@@ -155,7 +189,7 @@ SendResult Sender::send_transport(UdpSocket& socket, NoiseProtocol& protocol,
                                   Peer& peer,
                                   std::span<const uint8_t> plaintext) {
     Keypair* keypair = peer.keypairs().current().get();
-    if (!keypair || !keypair->is_sendable()) {
+    if (!keypair || !keypair->is_valid()) {
         return {};
     }
 
@@ -174,6 +208,14 @@ SendResult Sender::send_transport(UdpSocket& socket, NoiseProtocol& protocol,
         return {};
     }
     const std::span<const uint8_t> bytes(out.data(), out.size());
+    std::ostringstream log;
+    log << "TX TRANSPORT size=" << bytes.size()
+        << " receiver_index=" << keypair->remote_index
+        << " counter=" << msg.header.counter
+        << " plaintext_size=" << plaintext.size()
+        << " ciphertext_size=" << plaintext.size() + TAG_SIZE;
+    Logger::default_logger().debug(log.str());
+
     if (packet_logger_) {
         packet_logger_(bytes);
     }
@@ -189,7 +231,7 @@ SendResult Sender::send_keepalive(UdpSocket& socket, NoiseProtocol& protocol,
     }
 
     Keypair* keypair = peer.keypairs().current().get();
-    if (!keypair || !keypair->is_sendable()) {
+    if (!keypair || !keypair->is_valid()) {
         return {};
     }
 
@@ -207,6 +249,13 @@ SendResult Sender::send_keepalive(UdpSocket& socket, NoiseProtocol& protocol,
         return {};
     }
     const std::span<const uint8_t> bytes(out.data(), out.size());
+    std::ostringstream log;
+    log << "TX KEEPALIVE size=" << bytes.size()
+        << " receiver_index=" << keypair->remote_index
+        << " counter=" << msg.header.counter
+        << " plaintext_size=0 ciphertext_size=" << TAG_SIZE;
+    Logger::default_logger().debug(log.str());
+
     if (packet_logger_) {
         packet_logger_(bytes);
     }

@@ -6,7 +6,7 @@
 // 仿造wg实现的Noise协议高级封装
 namespace wg::noise {
 bool initialize_base(ChainingKey& base_chaining_key, Hash& base_hash,
-                     Hash& base_hash_self) {
+                     Hash& base_hash_self, PublicKey local_public) {
     // 还得包装一下 常量字符串，转换成span传给crypto层的hash函数
     // 没关系，反正这个函数只调用一次，效率不是问题。
     std::span<const uint8_t> construction_span(
@@ -20,7 +20,7 @@ bool initialize_base(ChainingKey& base_chaining_key, Hash& base_hash,
     // H_i
     wg::crypto::hash_concat(base_chaining_key, identifier_span, base_hash);
     // H_i_self
-    wg::crypto::hash_concat(base_chaining_key, identifier_span, base_hash_self);
+    wg::crypto::hash_concat(base_hash, local_public, base_hash_self);
     return true;
 }
 
@@ -74,7 +74,9 @@ void mix_ephemeral(const PublicKey& ephemeral_public, ChainingKey& chaining_key,
                    Hash& hash) {
     // kdf1 是安全的。
     // wg::crypto::kdf1(chaining_key, ephemeral_public, chaining_key);
-    mix_key(chaining_key, hash, ephemeral_public);
+    mix_key(chaining_key, std::span<const uint8_t>(ephemeral_public.data(),
+                                                   ephemeral_public.size()));
+    // mix_key(chaining_key, hash, ephemeral_public);
     mix_hash(hash, ephemeral_public);
 }
 
