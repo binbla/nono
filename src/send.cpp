@@ -96,6 +96,7 @@ SendResult Sender::send_initiation(UdpSocket& socket, NoiseProtocol& protocol,
         packet_logger_(bytes);
     }
     const ssize_t sent = socket.send_bytes(bytes, *peer.endpoint());
+    keypair.last_handshake_sent_at = Timestamp::now();
     return {sent == static_cast<ssize_t>(bytes.size()),
             sent > 0 ? static_cast<size_t>(sent) : 0};
 }
@@ -136,6 +137,7 @@ SendResult Sender::send_response(UdpSocket& socket, NoiseProtocol& protocol,
         packet_logger_(bytes);
     }
     const ssize_t sent = socket.send_bytes(bytes, *peer.endpoint());
+    keypair.last_handshake_sent_at = Timestamp::now();
     return {sent == static_cast<ssize_t>(bytes.size()),
             sent > 0 ? static_cast<size_t>(sent) : 0};
 }

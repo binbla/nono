@@ -183,11 +183,14 @@ SendResult Core::retry_handshake(Peer& peer) {
         return {};
     }
 
-    // CookieReply 只保存 cookie，不自动重发。调用方显式 retry 时，Core 根据
-    // pending keypair 的角色选择重发哪种握手包。
+    // retry 只允许推进本端主动发起的 initiation。response 是被动行为，只能由
+    // RX INIT 成功消费后触发。
     Keypair* pending = peer.keypairs().next().get();
-    if (pending != nullptr && !pending->i_am_the_initiator) {
-        return resend_response(peer, *pending);
+    if (pending != nullptr) {
+        if (!pending->i_am_the_initiator) {
+            return {};
+        }
+        return resend_initiation(peer, *pending);
     }
     return initiate_handshake(peer);
 }
@@ -198,6 +201,58 @@ SendResult Core::retry_handshake(const PublicKey& remote_static) {
         return {};
     }
     return retry_handshake(*peer);
+}
+
+Availability Core::ensure_available(Peer& peer) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!socket_ || !sender_) {
+        return Availability::Failed;
+    }
+
+    Keypair* current = peer.keypairs().current().get();
+    if (current != nullptr && current->is_valid()) {
+        return Availability::Ready;
+    }
+
+    Keypair* pending = peer.keypairs().next().get();
+    if (pending == nullptr) {
+        SendResult result = initiate_handshake(peer);
+        return result.ok ? Availability::HandshakeStarted
+                         : Availability::Failed;
+    }
+
+    if (!pending->i_am_the_initiator) {
+        return Availability::HandshakePending;
+    }
+
+    const Timestamp now = Timestamp::now();
+    const bool expired =
+        pending->created_at.diff_seconds(now) > REKEY_ATTEMPT_TIME;
+    const bool retry_timeout =
+        pending->last_handshake_sent_at.is_zero() ||
+        pending->last_handshake_sent_at.diff_seconds(now) >= REKEY_TIMEOUT;
+
+    if (expired) {
+        SendResult result = initiate_handshake(peer);
+        return result.ok ? Availability::HandshakeStarted
+                         : Availability::Failed;
+    }
+
+    if (retry_timeout) {
+        SendResult result = resend_initiation(peer, *pending);
+        return result.ok ? Availability::HandshakeStarted
+                         : Availability::Failed;
+    }
+
+    return Availability::HandshakePending;
+}
+
+Availability Core::ensure_available(const PublicKey& remote_static) {
+    Peer* peer = find_peer(remote_static);
+    if (peer == nullptr) {
+        return Availability::Failed;
+    }
+    return ensure_available(*peer);
 }
 
 bool Core::has_valid_session(Peer& peer) const {
@@ -214,6 +269,32 @@ bool Core::has_valid_session(const PublicKey& remote_static) const {
     }
     Keypair* current = peer->keypairs().current().get();
     return current != nullptr && current->is_valid();
+}
+
+SendResult Core::send_transport(Peer& peer, std::span<const uint8_t> packet) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!socket_ || !sender_) {
+        return {};
+    }
+
+    Keypair* current = peer.keypairs().current().get();
+    if (current == nullptr || !current->is_valid()) {
+        return {};
+    }
+
+    if (packet.size() > PAYLOAD_MAX_SIZE) {
+        return {};
+    }
+    return sender_->send_transport(*socket_, protocol_, peer, packet);
+}
+
+SendResult Core::send_transport(const PublicKey& remote_static,
+                                std::span<const uint8_t> packet) {
+    Peer* peer = find_peer(remote_static);
+    if (peer == nullptr) {
+        return {};
+    }
+    return send_transport(*peer, packet);
 }
 
 // ============================================================================
@@ -357,6 +438,13 @@ SendResult Core::initiate_handshake(Peer& peer) {
         index_table_.erase(keypair->local_index);
     }
     return result;
+}
+
+SendResult Core::resend_initiation(Peer& peer, Keypair& keypair) {
+    if (!sender_ || !socket_) {
+        return {};
+    }
+    return sender_->send_initiation(*socket_, protocol_, peer, keypair);
 }
 
 SendResult Core::resend_response(Peer& peer, Keypair& keypair) {

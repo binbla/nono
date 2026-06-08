@@ -123,7 +123,6 @@ class ReliableSession {
     MessageCallback message_callback_;
     std::vector<uint8_t> receive_buffer_;
     std::vector<std::vector<uint8_t>> pending_output_;
-    bool handshake_requested_ = false;
     std::mutex mutex_;
 };
 

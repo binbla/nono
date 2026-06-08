@@ -53,8 +53,9 @@ class Keypair {
     Peer* owner = nullptr;
     // 状态和计数器
     // 这两个也是交给send和receive用的
-    Timestamp created_at;    // keypair 创建时间，单位 ns
-    Timestamp last_used_at;  // keypair 最后一次使用时间，单位 ns
+    Timestamp created_at;              // keypair 创建时间，单位 ns
+    Timestamp last_used_at;            // keypair 最后一次使用时间，单位 ns
+    Timestamp last_handshake_sent_at;  // 最近一次握手包发送时间
 
     std::atomic<uint64_t> sending_counter = 0;
     std::atomic<uint64_t> receiving_counter = 0;
@@ -64,7 +65,7 @@ class Keypair {
     // 像是resp方只有收到第一条消息才能发送data
     // init方只要收到resp就能发data
     // 主要就是触发keypair 轮转那里的逻辑。
-    bool is_activated = false;  // 标识这个keypair是否可以发送
+    bool is_activated = false;  // 标识这个keypair是否激活
 
    public:
     // 发送和接收的对称密钥
@@ -88,6 +89,7 @@ class Keypair {
 
         // created_at.clear();
         last_used_at.clear();
+        last_handshake_sent_at.clear();
 
         sending_counter.store(0, std::memory_order_relaxed);
         receiving_counter.store(0, std::memory_order_relaxed);

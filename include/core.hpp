@@ -41,6 +41,14 @@ using PacketCallback =
     std::function<void(Peer& peer, std::span<const uint8_t> packet)>;
 using ReceiveEventCallback = std::function<void(const ReceiveResult& result)>;
 using WirePacketCallback = std::function<void(std::span<const uint8_t> packet)>;
+
+enum class Availability {
+    Ready,
+    HandshakeStarted,
+    HandshakePending,
+    Failed,
+};
+
 class Core {
    public:
     Core();
@@ -107,10 +115,22 @@ class Core {
 
     SendResult retry_handshake(const PublicKey& remote_static);
 
+    // 推进 initiator 侧握手，直到 peer 可以发送 transport data。
+    // responder 侧 response 只会在收到有效 initiation 后由 receive path 被动发送。
+    Availability ensure_available(Peer& peer);
+
+    Availability ensure_available(const PublicKey& remote_static);
+
     // 查询当前 peer 是否已有可发送 transport data 的有效 keypair。
     bool has_valid_session(Peer& peer) const;
 
     bool has_valid_session(const PublicKey& remote_static) const;
+
+    // 只发送 transport data；没有有效 keypair 时直接失败，不隐式发握手。
+    SendResult send_transport(Peer& peer, std::span<const uint8_t> packet);
+
+    SendResult send_transport(const PublicKey& remote_static,
+                              std::span<const uint8_t> packet);
 
     // ------------------------------------------------------------
     // 接收接口
@@ -161,6 +181,7 @@ class Core {
 
     // 发送握手包的内部入口。外层 API 负责加锁和参数检查。
     SendResult initiate_handshake(Peer& peer);
+    SendResult resend_initiation(Peer& peer, Keypair& keypair);
     SendResult resend_response(Peer& peer, Keypair& keypair);
 
     // Receiver 只返回“发生了什么”，Core 在这里完成后续编排：

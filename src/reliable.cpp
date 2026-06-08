@@ -310,7 +310,7 @@ void ReliableSession::send_pending_output(
         log << "KCP OUTPUT conv=" << conv_
             << " segment_size=" << segment.size();
         Logger::default_logger().debug(log.str());
-        core_.send_to_peer(peer_, {segment.data(), segment.size()});
+        core_.send_transport(peer_, {segment.data(), segment.size()});
     }
 }
 
@@ -320,20 +320,15 @@ int ReliableSession::output(std::span<const uint8_t> segment) {
 }
 
 bool ReliableSession::ensure_transport_ready_locked() {
-    if (core_.has_valid_session(peer_)) {
-        handshake_requested_ = false;
+    const Availability availability = core_.ensure_available(peer_);
+    if (availability == Availability::Ready) {
         return true;
     }
 
-    if (!handshake_requested_) {
-        SendResult result = core_.begin_handshake(peer_);
-        handshake_requested_ = result.ok;
-        std::ostringstream log;
-        log << "KCP WAIT transport_session conv=" << conv_
-            << " handshake_sent=" << (result.ok ? 1 : 0)
-            << " bytes_sent=" << result.bytes_sent;
-        Logger::default_logger().debug(log.str());
-    }
+    std::ostringstream log;
+    log << "KCP WAIT transport_session conv=" << conv_
+        << " availability=" << static_cast<int>(availability);
+    Logger::default_logger().debug(log.str());
     return false;
 }
 
