@@ -1,0 +1,16 @@
+# Keys are 32-byte hex strings.
+# Empty psk, null, ~, "-", or "empty" mean no preshared key.
+
+local:
+  private_key: f04e8e4941b2abd5470df379be663182935d134f028f464dea170d17d8dcf56d
+  public_key: ea78b8d72eeac622532717e0b4a4de5aa1ae30a80c23a86d1f862e609598ec3a
+  bind_address: 0.0.0.0
+  bind_port: 40001
+  log_file: /tmp/nono-im-40001.log
+
+peers:
+  - name: alice
+    public_key: 18f80a6447f88e93c4f6369db332121ffef45236b1b9a3c892c14495ce902365
+    address: 127.0.0.1
+    port: 40002
+    psk:

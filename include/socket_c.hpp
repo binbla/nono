@@ -45,6 +45,10 @@ class UdpSocket {
 
     explicit UdpSocket(uint16_t port) { open_and_bind(port); }
 
+    explicit UdpSocket(const Endpoint& endpoint) {
+        open_and_bind_endpoint(endpoint);
+    }
+
     ~UdpSocket() { close_if_open(); }
 
     UdpSocket(const UdpSocket&) = delete;
@@ -175,6 +179,44 @@ class UdpSocket {
         open_and_bind_ipv4(port);
     }
 
+    void open_and_bind_endpoint(const Endpoint& endpoint) {
+        if (endpoint.family() == AF_INET6) {
+            fd_ = ::socket(AF_INET6, SOCK_DGRAM, 0);
+            if (fd_ < 0) {
+                throw_system_error("socket");
+            }
+            try {
+                set_reuse_addr();
+                set_dual_stack();
+                bind_endpoint(endpoint);
+                set_non_blocking();
+            } catch (...) {
+                close_if_open();
+                throw;
+            }
+            return;
+        }
+
+        if (endpoint.family() == AF_INET) {
+            fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+            if (fd_ < 0) {
+                throw_system_error("socket");
+            }
+            try {
+                set_reuse_addr();
+                bind_endpoint(endpoint);
+                set_non_blocking();
+            } catch (...) {
+                close_if_open();
+                throw;
+            }
+            return;
+        }
+
+        errno = EINVAL;
+        throw_system_error("bind(endpoint)");
+    }
+
     void open_and_bind_ipv6(uint16_t port) {
         fd_ = ::socket(AF_INET6, SOCK_DGRAM, 0);
         if (fd_ < 0) {
@@ -243,6 +285,12 @@ class UdpSocket {
 
         if (::bind(fd_, reinterpret_cast<const sockaddr*>(&addr),
                    sizeof(addr)) < 0) {
+            throw_system_error("bind");
+        }
+    }
+
+    void bind_endpoint(const Endpoint& endpoint) {
+        if (::bind(fd_, endpoint.addr(), endpoint.size()) < 0) {
             throw_system_error("bind");
         }
     }

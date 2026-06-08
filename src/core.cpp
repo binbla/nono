@@ -57,14 +57,13 @@ bool Core::generate_identity_and_initialize() {
 }
 
 bool Core::bind(const Endpoint& local_endpoint) {
-    // UdpSocket 当前按端口监听所有地址。传入 Endpoint 是为了保留未来按
-    // 地址族/本地地址绑定的 API 形状。
-    if (!protocol_.initialized() || local_endpoint.port() == 0) {
+    if (!protocol_.initialized() || local_endpoint.port() == 0 ||
+        local_endpoint.size() == 0) {
         return false;
     }
 
     try {
-        socket_ = std::make_unique<UdpSocket>(local_endpoint.port());
+        socket_ = std::make_unique<UdpSocket>(local_endpoint);
         return true;
     } catch (const std::runtime_error&) {
         socket_.reset();

@@ -59,7 +59,7 @@ class Core {
     // 生成一组临时本地身份并初始化协议栈，适合测试程序或短生命周期节点。
     bool generate_identity_and_initialize();
 
-    // 绑定本地 UDP 端口。Endpoint 目前只使用端口字段，实际监听所有本地地址。
+    // 绑定本地 UDP 地址和端口，支持 IPv4 / IPv6 Endpoint。
     bool bind(const Endpoint& local_endpoint);
 
     // 启动后台循环：持续 poll UDP socket，并驱动 TimerManager。

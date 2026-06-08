@@ -135,6 +135,14 @@ target_link_libraries(nono_stack
 # Test / Demo Programs
 # -----------------------------------------------------------------------------
 
+add_executable(nono_im_tui
+    src/im_tui.cpp
+)
+target_link_libraries(nono_im_tui
+    PRIVATE
+        nono::stack
+)
+
 if(NONO_BUILD_TESTS)
     add_executable(nono_core_test
         src/core_test.cpp
@@ -142,6 +150,14 @@ if(NONO_BUILD_TESTS)
     target_link_libraries(nono_core_test
         PRIVATE
             nono::stack
+    )
+
+    add_executable(nono_keygen_test
+        src/keygen_test.cpp
+    )
+    target_link_libraries(nono_keygen_test
+        PRIVATE
+            nono::crypto
     )
 
     add_executable(nono_echo_test
