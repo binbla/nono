@@ -90,7 +90,9 @@ class Peer {
     const Hash& precomputed_mac2_hash() const { return precomputed_mac2_hash_; }
 
     Handshake& handshake() { return handshake_; }  // 返回的是引用，方便外部修改
+    const Handshake& handshake() const { return handshake_; }
     KeypairManager& keypairs() { return keypairs_; }
+    const KeypairManager& keypairs() const { return keypairs_; }
 
    private:
     PublicKey remote_static_{};

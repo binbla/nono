@@ -141,6 +141,10 @@ ReliableSendResult ReliableSession::send(std::span<const uint8_t> message) {
             << " message_size=" << message.size();
         Logger::default_logger().debug(log.str());
 
+        if (!ensure_transport_ready_locked()) {
+            return {.ok = true, .kcp_result = rc};
+        }
+
         if (config_.flush_after_send()) {
             ikcp_flush(kcp_);
         }
@@ -183,6 +187,9 @@ void ReliableSession::update() {
         if (kcp_ == nullptr) {
             return;
         }
+        if (!ensure_transport_ready_locked()) {
+            return;
+        }
         ikcp_update(kcp_, now_ms());
         messages = drain_received_messages();
         pending = take_pending_output();
@@ -195,10 +202,14 @@ void ReliableSession::flush() {
     std::vector<std::vector<uint8_t>> pending;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (kcp_ != nullptr) {
-            ikcp_flush(kcp_);
-            pending = take_pending_output();
+        if (kcp_ == nullptr) {
+            return;
         }
+        if (!ensure_transport_ready_locked()) {
+            return;
+        }
+        ikcp_flush(kcp_);
+        pending = take_pending_output();
     }
     send_pending_output(std::move(pending));
 }
@@ -306,6 +317,24 @@ void ReliableSession::send_pending_output(
 int ReliableSession::output(std::span<const uint8_t> segment) {
     pending_output_.emplace_back(segment.begin(), segment.end());
     return 0;
+}
+
+bool ReliableSession::ensure_transport_ready_locked() {
+    if (core_.has_valid_session(peer_)) {
+        handshake_requested_ = false;
+        return true;
+    }
+
+    if (!handshake_requested_) {
+        SendResult result = core_.begin_handshake(peer_);
+        handshake_requested_ = result.ok;
+        std::ostringstream log;
+        log << "KCP WAIT transport_session conv=" << conv_
+            << " handshake_sent=" << (result.ok ? 1 : 0)
+            << " bytes_sent=" << result.bytes_sent;
+        Logger::default_logger().debug(log.str());
+    }
+    return false;
 }
 
 ReliableManager::ReliableManager(Core& core, ReliableConfig config)

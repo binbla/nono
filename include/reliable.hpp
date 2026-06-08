@@ -113,6 +113,7 @@ class ReliableSession {
     std::vector<std::vector<uint8_t>> take_pending_output();
     void send_pending_output(std::vector<std::vector<uint8_t>> segments);
     int output(std::span<const uint8_t> segment);
+    bool ensure_transport_ready_locked();
 
     Core& core_;
     Peer& peer_;
@@ -122,6 +123,7 @@ class ReliableSession {
     MessageCallback message_callback_;
     std::vector<uint8_t> receive_buffer_;
     std::vector<std::vector<uint8_t>> pending_output_;
+    bool handshake_requested_ = false;
     std::mutex mutex_;
 };
 

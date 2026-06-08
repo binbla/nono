@@ -107,6 +107,11 @@ class Core {
 
     SendResult retry_handshake(const PublicKey& remote_static);
 
+    // 查询当前 peer 是否已有可发送 transport data 的有效 keypair。
+    bool has_valid_session(Peer& peer) const;
+
+    bool has_valid_session(const PublicKey& remote_static) const;
+
     // ------------------------------------------------------------
     // 接收接口
     // ------------------------------------------------------------

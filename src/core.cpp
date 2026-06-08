@@ -200,6 +200,22 @@ SendResult Core::retry_handshake(const PublicKey& remote_static) {
     return retry_handshake(*peer);
 }
 
+bool Core::has_valid_session(Peer& peer) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Keypair* current = peer.keypairs().current().get();
+    return current != nullptr && current->is_valid();
+}
+
+bool Core::has_valid_session(const PublicKey& remote_static) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const Peer* peer = peer_manager_.find_by_public_key(remote_static);
+    if (peer == nullptr) {
+        return false;
+    }
+    Keypair* current = peer->keypairs().current().get();
+    return current != nullptr && current->is_valid();
+}
+
 // ============================================================================
 // Receive Pump
 // ============================================================================
